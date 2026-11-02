@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 15mm 15mm 13mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK JP", sans-serif; color: #1d2733; font-size: 12.5pt; line-height: 1.6; margin: 0; }
+  .header { background: #14324A; color: #fff; border-radius: 12px; padding: 18px 22px 14px; margin-bottom: 14px; }
+  .header .kicker { color: #FFB37E; font-size: 10pt; letter-spacing: .12em; margin: 0 0 4px; }
+  .header h1 { font-size: 21pt; margin: 0 0 6px; line-height: 1.35; }
+  .header p { margin: 0; font-size: 11pt; color: #D8E4EE; }
+  h2 { font-size: 15pt; color: #14324A; border-left: 7px solid #FF7A1A; padding-left: 10px; margin: 18px 0 8px; line-height: 1.4; }
+  p { margin: 5px 0; }
+  .flow { background: #EEF3F8; border-radius: 10px; padding: 10px 16px; font-size: 12pt; }
+  .flow b { color: #14324A; }
+  .step { border: 1.5px solid #D5DEE8; border-radius: 12px; padding: 10px 15px 8px; margin: 9px 0; page-break-inside: avoid; }
+  .step .num { display: inline-block; background: #FF7A1A; color: #fff; font-weight: bold; width: 28px; height: 28px; line-height: 28px; text-align: center; border-radius: 50%; font-size: 13pt; margin-right: 8px; vertical-align: middle; }
+  .step h3 { display: inline; font-size: 13.5pt; color: #14324A; vertical-align: middle; }
+  .step p, .step ul { margin: 5px 0 2px 36px; font-size: 12pt; }
+  .step ul { padding-left: 16px; }
+  .step li { margin: 2px 0; }
+  .word { background: #FFF4E5; border-radius: 6px; padding: 1px 6px; font-size: 11pt; }
+  .warn { background: #FFF4E5; border: 1.5px solid #F0B35E; border-radius: 12px; padding: 10px 16px 6px; margin-top: 10px; page-break-inside: avoid; }
+  .warn h2 { border: none; padding: 0; margin: 0 0 4px; color: #8A5410; font-size: 14pt; }
+  .warn p { font-size: 12pt; margin: 4px 0; }
+  .footer { margin-top: 14px; background: #EEF3F8; border-radius: 10px; padding: 10px 15px; font-size: 12pt; page-break-inside: avoid; }
+  .small { font-size: 10pt; color: #667; text-align: right; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <p class="kicker">MUSE × MAC SETUP</p>
+    <h1>携帯のMuseから、Macを操作する設定のやり方</h1>
+    <p>パパがやった方法を、そのまま真似できるようにまとめました。むずかしい操作はなくて、やることは「コピーして貼る」だけです。</p>
+  </div>
+
+  <p class="flow"><b>全体の流れ：</b> 1. Macに準備をする → 2. Museを招待する → 3. 合鍵を登録する → 4. あとは携帯から頼むだけ</p>
+
+  <h2>準備するもの</h2>
+  <p>自分のMac、iPhone（Museのアプリ入り）、Googleアカウント。この3つがあれば始められます。</p>
+
+  <h2>手順</h2>
+
+  <div class="step">
+    <span class="num">1</span><h3>Macに「Tailscale」を入れる</h3>
+    <p>Tailscale（テイルスケール）は、外から安全に自分のMacへつなぐためのアプリです。鍵付きのトンネルのようなものだと思ってください。</p>
+    <ul>
+      <li>MacでTailscaleをダウンロードして開く</li>
+      <li>自分のアカウントでログインする</li>
+      <li>画面の上のメニューバーに、Tailscaleのマークが出ていればOK</li>
+    </ul>
+  </div>
+
+  <div class="step">
+    <span class="num">2</span><h3>Macの「リモートログイン」をオンにする</h3>
+    <p>これは、Macが「外からの操作を受け付けます」というスイッチです。</p>
+    <ul>
+      <li>画面左上のりんごマーク →「システム設定」→「一般」→「共有」</li>
+      <li>「リモートログイン」をオンにする</li>
+    </ul>
+  </div>
+
+  <div class="step">
+    <span class="num">3</span><h3>使うときの決まり（電源）</h3>
+    <p>Macが寝てしまうと接続が切れます。Museに頼むときは、Macを電源ケーブルにつないで、蓋を開けたままにしてください。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">4</span><h3>Museを招待する</h3>
+    <ul>
+      <li>iPhoneのMuseに「私のMacとつないで」と頼む</li>
+      <li>Museが接続用のリンクを出すので、それを開いて承認する</li>
+      <li>これでMuseが、あなたのネットワークのメンバーになります</li>
+    </ul>
+    <p>承認するのは、自分のMuseが出したリンクだけにしてください。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">5</span><h3>コマンドの受け渡し方（大事なルール）</h3>
+    <p>設定の途中で、Museから「Macでこれを実行して」と言われる場面があります。<span class="word">コマンド = Macへの命令文のこと（英語や記号の1行）</span></p>
+    <p>我が家のやり方では、コマンドをチャットに直接貼りません。Googleドライブの「Mac接続セットアップ用コマンド.txt」という決まったファイルに、Museが番号つきで書きます。自分のMuseにも、最初にそう頼んでおいてください。</p>
+    <ul>
+      <li>そのファイルを開く</li>
+      <li>Museに言われた番号の「1行」をコピーする</li>
+      <li>Macの「ターミナル」というアプリを開いて、貼り付けて、Enterキーを押す</li>
+    </ul>
+    <p>やるのはこれだけです。ファイルはMuseが毎回書き直すので、リンクはいつも同じです。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">6</span><h3>合鍵（公開鍵）を登録する</h3>
+    <p>手順5のファイルの中に、「公開鍵を登録する1行」が入っています。それを同じようにコピーして貼ると、次からはMuseが自分でMacに入って作業できるようになります。</p>
+    <p>公開鍵は、Muse専用の合鍵のようなものです。あなたのパスワードを渡すわけではありません。パスワードは、チャットには絶対に書かないでください。</p>
+  </div>
+
+  <h2>使い始めたら</h2>
+  <p>あとは、iPhoneのMuseに普通の言葉で頼むだけです。「Macの容量を見て」「あのファイルを探して」のように頼めば、MuseがMacを操作します。</p>
+  <p>Museが何をしているか画面で見たいときは、「画面に窓を出すモードにして」「作業ログの窓を出して」と頼んでください。Macの画面に、ブラウザの窓や、コマンドの作業ログが出るようになります。パパはこの見える設定にしています。</p>
+
+  <div class="warn">
+    <h2>安全のために</h2>
+    <p>・承認の画面が出たら、自分のMuseからのものか確かめてから押してください。</p>
+    <p>・やめたいときは、Tailscaleの画面でMuseの機器を削除するか、Macの「リモートログイン」をオフにすれば、すぐ切れます。</p>
+    <p>・大事なファイルを消すような作業は、「先に中身を教えて、私が『いいよ』と言ってから進めて」と、自分のMuseに最初に頼んでおくと安心です。パパもそうしています。</p>
+  </div>
+
+  <div class="footer">
+    分からなくなったら、パパに聞いてください。画面の写真を撮って送ってもらえれば、一緒に確認できます。
+  </div>
+
+  <p class="small">パパのAIエージェント作成（2026年11月2日）</p>
+</body>
+</html>

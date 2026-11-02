@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 16mm 15mm 14mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Noto Sans CJK JP", sans-serif; color: #1d2733; font-size: 13.5pt; line-height: 1.65; margin: 0; }
+  .header { background: #14324A; color: #fff; border-radius: 12px; padding: 20px 24px 16px; margin-bottom: 18px; }
+  .header .kicker { color: #FFB37E; font-size: 10.5pt; letter-spacing: .12em; margin: 0 0 4px; }
+  .header h1 { font-size: 24pt; margin: 0 0 6px; line-height: 1.3; }
+  .header p { margin: 0; font-size: 11.5pt; color: #D8E4EE; }
+  h2 { font-size: 16pt; color: #14324A; border-left: 7px solid #FF7A1A; padding-left: 10px; margin: 22px 0 10px; line-height: 1.4; }
+  p { margin: 6px 0; }
+  .path { background: #EEF3F8; border-radius: 8px; padding: 10px 14px; font-size: 13pt; }
+  .step { border: 1.5px solid #D5DEE8; border-radius: 12px; padding: 12px 16px 10px; margin: 10px 0; page-break-inside: avoid; }
+  .step .num { display: inline-block; background: #FF7A1A; color: #fff; font-weight: bold; width: 30px; height: 30px; line-height: 30px; text-align: center; border-radius: 50%; font-size: 14pt; margin-right: 8px; vertical-align: middle; }
+  .step h3 { display: inline; font-size: 14.5pt; color: #14324A; vertical-align: middle; }
+  .step p { margin: 6px 0 2px 38px; font-size: 12.5pt; }
+  .warn { background: #FFF4E5; border: 1.5px solid #F0B35E; border-radius: 12px; padding: 12px 18px 8px; margin-top: 8px; page-break-inside: avoid; }
+  .warn h2 { border: none; padding: 0; margin: 0 0 6px; color: #8A5410; font-size: 15pt; }
+  .warn p { font-size: 12.5pt; margin: 5px 0; }
+  .footer { margin-top: 20px; background: #EEF3F8; border-radius: 10px; padding: 12px 16px; font-size: 12.5pt; page-break-inside: avoid; }
+  .small { font-size: 10.5pt; color: #667; text-align: right; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <p class="kicker">MAC STORAGE GUIDE</p>
+    <h1>Macの容量を空けるやり方</h1>
+    <p>パパのMacでやった作業を、同じ順番でできるようにまとめました。特別な道具はいりません。上から順に進めてください。</p>
+  </div>
+
+  <h2>まず、容量を確認する</h2>
+  <p class="path">画面左上のりんごマーク →「システム設定」→「一般」→「ストレージ」</p>
+  <p>今どれくらい使っているかと、何に使っているかの内訳が出ます。「システムデータ」の数字が大きいと、今回のパパと同じ状態です。</p>
+
+  <h2>空きを増やす手順（安全な順番です）</h2>
+
+  <div class="step">
+    <span class="num">1</span><h3>ゴミ箱を空にする</h3>
+    <p>画面下のDockにあるゴミ箱を右クリックして、「ゴミ箱を空にする」を押します。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">2</span><h3>Macを再起動する</h3>
+    <p>りんごマークから「再起動」を押します。これだけで「システムデータ」が減ることがあります。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">3</span><h3>ダウンロードフォルダを見直す</h3>
+    <p>Finder（画面下の顔のマーク）から「ダウンロード」を開きます。昔にダウンロードしたファイルや、アプリのインストール用ファイル（名前の最後が「.dmg」や「.pkg」のもの）が残っていたら、ゴミ箱へ移します。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">4</span><h3>使っていないアプリを消す</h3>
+    <p>「システム設定」→「一般」→「ストレージ」の画面に、アプリの一覧が出ます。サイズの大きいものから並んでいるので、もう使っていないアプリを選んで削除します。</p>
+  </div>
+
+  <div class="step">
+    <span class="num">5</span><h3>それでも足りないとき</h3>
+    <p>写真や動画など、自分の大事なファイルは消さずに、USBメモリや外付けハードディスクに移すと安全です。</p>
+  </div>
+
+  <div class="warn">
+    <h2>やらないでね</h2>
+    <p>・「クリーナー」と書いてある無料アプリは入れないでください。広告が出たり、余計なものを入れたりすることがあります。</p>
+    <p>・「ライブラリ」というフォルダの中身は、自分では消さないでください。大事なデータが入っています。パパのMacでは、中身を1つずつ確認してから、消してもよいものだけを消しました。</p>
+    <p>・何のファイルか分からないものは、消す前にパパに聞いてください。</p>
+  </div>
+
+  <div class="footer">
+    分からなくなったら、ストレージの画面の写真を撮ってパパに送ってください。一緒に確認します。
+  </div>
+
+  <p class="small">パパのAIエージェント作成（2026年11月2日）</p>
+</body>
+</html>

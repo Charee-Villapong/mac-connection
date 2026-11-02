@@ -1,0 +1,9 @@
+name: custom.mac-playwright
+display_name: Mac Playwright
+description: >-
+  Browser control on the user's own MacBook Air via a Playwright MCP server
+  bound to the Mac's Tailscale address. Local setup, no third-party
+  credential; reachability is gated by the user's private tailnet.
+transport: mcp-streamable-http
+endpoint: http://<MacのTailscale IP>:8931/mcp
+client: bin/client.py
