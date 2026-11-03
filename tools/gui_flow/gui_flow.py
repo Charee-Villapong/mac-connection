@@ -162,6 +162,11 @@ CAREFUL_BASE_DEFAULTS = {
     "probe_x_ratios": [0.5, 0.35, 0.65, 0.25, 0.75],  # 横位置 (フレーム幅比)
     "probe_max_candidates": 36,  # 候補点の上限 (既定グリッド総数 31 を覆う)
     "self_check_text": "",  # 空なら SELF_CHECK_TEXTS の既定値を使う
+    # 想定外の覆い (ポップアップ等) への汎用解消。個別の文言・形には
+    # 依存せず、Esc + 窓の上部帯への外側クリックだけで解消を試みる。
+    "dismiss_retries": 1,  # 解消 → 再プローブの試行回数
+    "dismiss_click_x_ratio": 0.5,  # 外側クリックの横位置 (フレーム幅比)
+    "dismiss_click_y_offset": 16,  # 外側クリックの縦位置 (フレーム上端から px)
 }
 
 # アプリ別の既定値 (入力欄の縦位置はアプリで大きく異なるため分ける)
@@ -755,6 +760,34 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
 
+def build_dismiss_script(name, app, acfg, frame, ccfg):
+    """覆い解消フェーズ (careful 専用): 想定外の何かが画面を覆っている
+    疑いがあるとき、汎用の方法だけで解消を試みる。
+
+    個別のポップアップの文言・形・専用座標には依存しない: Esc キーと、
+    ウィンドウ自身の上部帯 (フレーム相対のニュートラルな位置) への
+    クリック (外側クリック) だけを使う。テキスト入力も送信キーも
+    一切送らない。解消できたかの判定は呼び出し側の再プローブで行う。
+    """
+    fx, fy, fw, _ = (int(v) for v in frame)
+    nx = int(fx + fw * float(ccfg["dismiss_click_x_ratio"]))
+    ny = int(fy + int(ccfg["dismiss_click_y_offset"]))
+    parts = [HDR]
+    parts.append('open -a "%s"' % acfg["app_name"])
+    parts.append("sleep 0.5")
+    parts.append("PID=$(pgrep -x %s | head -1)" % acfg["process"])
+    parts.append('say "pid=$PID"')
+    parts.append('if [ -z "$PID" ]; then say "status=app_not_running"; exit 0; fi')
+    parts.append("$KH keyf 53 - pid $PID")  # Esc: メニュー/ポップオーバーを閉じる
+    parts.append("sleep 0.4")
+    parts.append("$GH click %d %d" % (nx, ny))  # 外側クリック (窓の上部帯)
+    parts.append("sleep 0.4")
+    parts.append("$KH keyf 53 - pid $PID")
+    parts.append("sleep 0.3")
+    parts.append('say "status=ok"')
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
 # ウィンドウ選択 (ScreenCheck list から対象アプリ最大の表示中ウィンドウを 1 つ選ぶ)
 AWK_SELECT = r"""awk -v app="$APP" '
 {
@@ -1175,6 +1208,7 @@ class Runner:
         self.last_png_bytes = None
         self.last_frame = None
         self.careful_screenshot = None
+        self.overlay_blocked = False
 
     def _name(self, action):
         self.counter += 1
@@ -1591,6 +1625,64 @@ class Runner:
         )
         return out
 
+    def dismiss_overlay(self, frame, ccfg):
+        """想定外の覆いの汎用解消 (Esc + 外側クリック) を試みる。
+
+        スクリプトが完走したら True。解消できたか自体の判定は、この後の
+        再プローブに委ねる。結果は checks の overlay_dismiss に残す。
+        """
+        name = self._name("dismiss")
+        res = self._timed(
+            "dismiss",
+            lambda: self.mac.run_queue(
+                build_dismiss_script(name, self.app, self.acfg, frame, ccfg),
+                name,
+            ),
+        )
+        st = res.get("status", "no_result")
+        self.checks.append(
+            {
+                "name": "overlay_dismiss",
+                "ok": st == "ok",
+                "evidence": "汎用解消 (Esc + 外側クリック) を実行: status=%s" % st,
+            }
+        )
+        return st == "ok"
+
+    def _probe_after_dismiss(self, candidates, frame, ccfg, res):
+        """プローブが probe_no_hit のとき: 汎用解消 → 再プローブを行う。
+
+        想定外の覆い (ポップアップ等) で入力欄に到達できていない疑い
+        として扱う。解消できれば解消後のプローブ結果を返し、できなけ
+        れば overlay_blocked を立てて最後の結果を返す (無理に進めない)。
+        """
+        for _ in range(max(0, int(ccfg["dismiss_retries"]))):
+            if not self.dismiss_overlay(frame, ccfg):
+                break
+            self.careful_capture("overlay-dismissed")
+            res = self.probe(candidates, ccfg)
+            if res["status"] != "probe_no_hit":
+                break
+        if res["status"] == "ok" and res["point"] is not None:
+            self.checks.append(
+                {
+                    "name": "overlay",
+                    "ok": True,
+                    "evidence": "覆いを解消し、再プローブで入力欄に到達できた",
+                }
+            )
+        elif res["status"] == "probe_no_hit":
+            self.overlay_blocked = True
+            self.checks.append(
+                {
+                    "name": "overlay",
+                    "ok": False,
+                    "evidence": "汎用解消を試みても入力欄に到達できず停止 "
+                    "(想定外の覆いが残っている疑い。無理に進めない)",
+                }
+            )
+        return res
+
     def careful(self):
         """慎重モード本体。戻り値: (ok, learned, self_check_ok)。
 
@@ -1634,6 +1726,10 @@ class Runner:
             }
         )
         res = self.probe(candidates, ccfg)
+        if res["status"] == "probe_no_hit":
+            # 入力欄に到達できない = 想定外の覆いの疑い。汎用解消を試す。
+            # (欄の残り anomaly_leftover は従来通り何も触らず停止する)
+            res = self._probe_after_dismiss(candidates, frame, ccfg, res)
         if res["status"] != "ok" or res["point"] is None:
             self.careful_capture("probe-failed")
             return False, learned, False
@@ -1809,7 +1905,8 @@ def main():
             ok, learned, self_check_ok = r.careful()
             self_check = {"ok": self_check_ok}
             if not ok and error is None:
-                error = "careful_failed"
+                # 覆いを解消できずに停止した場合は理由を分けて報告する
+                error = "overlay_unresolved" if r.overlay_blocked else "careful_failed"
         elif args.action == "send":
             # 承認ゲート: 欄の文面を読み戻し、その文面の承認があるときだけ送る。
             field_text = r.readback_field()

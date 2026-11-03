@@ -804,6 +804,109 @@ def test_probe_script_candidates_are_literal_calls():
     assert calls == ["try_one %d %d" % p for p in pts]
 
 
+# --- 慎重モード: 覆いの汎用解消 -------------------------------------------------------
+
+
+def test_dismiss_script_is_generic():
+    # 解消は Esc + フレーム相対の外側クリックのみ。個別ポップアップの
+    # 文言・専用座標に依存せず、入力も送信キーも送らない。
+    ccfg = gui_flow.careful_cfg("discord", DISCORD_CFG)
+    s = gui_flow.build_dismiss_script(
+        "gf-x.sh", "discord", DISCORD_CFG, (0, 30, 1440, 870), ccfg
+    )
+    assert "keyf 53" in s  # Esc
+    assert "click 720 46" in s  # 0 + 1440*0.5 / 30 + 16 (フレーム相対)
+    assert s.count(" click ") == 1  # クリックはこの 1 点だけ
+    assert "$GH type" not in s  # テキスト入力なし
+    assert "keyf 36" not in s  # 送信キーなし
+
+
+def _no_hit():
+    return {
+        "status": "probe_no_hit",
+        "hit_index": -1,
+        "point": None,
+        "tried": 31,
+        "field_empty_after": True,
+    }
+
+
+def test_careful_overlay_dismiss_then_retry_succeeds(tmp_path, monkeypatch):
+    # 覆いがある → 解消 → 再試行できる、という仕組み側の異常系
+    seq = [
+        _no_hit(),
+        {
+            "status": "ok",
+            "hit_index": 0,
+            "point": (700, 852),
+            "tried": 1,
+            "field_empty_after": True,
+        },
+    ]
+    r, cfg_file, learned_file = _careful_runner(tmp_path, monkeypatch, seq[0])
+    calls = {"probe": 0, "dismiss": 0}
+
+    def probe(candidates, ccfg):
+        calls["probe"] += 1
+        return seq.pop(0)
+
+    def dismiss(frame, ccfg):
+        calls["dismiss"] += 1
+        return True
+
+    r.probe = probe
+    r.dismiss_overlay = dismiss
+    ok, learned, self_check_ok = r.careful()
+    assert ok is True
+    assert calls == {"probe": 2, "dismiss": 1}
+    assert checks_by_name(r.checks)["overlay"] is True
+    assert r.overlay_blocked is False
+
+
+def test_careful_overlay_unresolved_stops(tmp_path, monkeypatch):
+    # 解消しても到達できなければ、学習せず停止して報告する
+    r, cfg_file, learned_file = _careful_runner(tmp_path, monkeypatch, _no_hit())
+    calls = {"probe": 0, "dismiss": 0}
+
+    def probe(candidates, ccfg):
+        calls["probe"] += 1
+        return _no_hit()
+
+    def dismiss(frame, ccfg):
+        calls["dismiss"] += 1
+        return True
+
+    r.probe = probe
+    r.dismiss_overlay = dismiss
+    ok, learned, self_check_ok = r.careful()
+    assert ok is False
+    assert self_check_ok is False
+    assert learned == []
+    assert calls == {"probe": 2, "dismiss": 1}  # 初回 + 解消後の 1 回だけ
+    assert checks_by_name(r.checks)["overlay"] is False
+    assert r.overlay_blocked is True
+    assert not learned_file.exists()
+
+
+def test_careful_leftover_never_dismisses(tmp_path, monkeypatch):
+    # 欄の残りは「何も触らない」が優先。解消 (クリック等) も試みない
+    probe_result = {
+        "status": "anomaly_leftover",
+        "hit_index": -1,
+        "point": None,
+        "tried": 0,
+        "field_empty_after": False,
+    }
+    r, _, _ = _careful_runner(tmp_path, monkeypatch, probe_result)
+
+    def dismiss(frame, ccfg):
+        raise AssertionError("残りありでは解消を試みてはいけない")
+
+    r.dismiss_overlay = dismiss
+    ok, learned, self_check_ok = r.careful()
+    assert ok is False
+
+
 # --- 学習の保存 -----------------------------------------------------------------
 
 

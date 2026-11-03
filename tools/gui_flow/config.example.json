@@ -21,7 +21,10 @@
           95,
           130
         ],
-        "self_check_text": ""
+        "self_check_text": "",
+        "dismiss_retries": 1,
+        "dismiss_click_x_ratio": 0.5,
+        "dismiss_click_y_offset": 16
       },
       "field_from_bottom": 90,
       "header_band": 110,
@@ -66,7 +69,10 @@
           170,
           200
         ],
-        "self_check_text": ""
+        "self_check_text": "",
+        "dismiss_retries": 1,
+        "dismiss_click_x_ratio": 0.5,
+        "dismiss_click_y_offset": 16
       },
       "field_from_bottom": 160,
       "header_band": 110,
