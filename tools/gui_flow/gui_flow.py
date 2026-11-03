@@ -41,6 +41,11 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
     全消去して再入力する高速リトライを最大 2 回まで自動で行う。
     宛先不一致・欄の残り・画面が読めない等の異常はリトライせず即停止する。
   - 送信後検閲 NG は自動で送り直さず、報告のみとする。
+  - 送信成功時 (post / send) は、送信後検閲で撮影したキャプチャを VM 側の
+    定位置 (~/workspace/mac-shots/) へ保存し、結果 JSON の screenshot に
+    そのパスを返す (エージェントが探しに行く手順を定型化するため)。
+    取得・保存に失敗しても送信結果は成功のままとし、screenshot は null +
+    理由を checks に残す。
 
 環境依存値 (接続先・座標・宛先名など) はコードに書かず、
 同ディレクトリの config.local.json (git 管理外) から読む。
@@ -206,6 +211,42 @@ APPROVAL_REASON_JA = {
     "used": "承認記録は使用済み",
     "expired": "承認記録の有効期限切れ",
 }
+
+
+# --- 送信後スクショの受け渡し -------------------------------------------------
+# 本人の希望は「送信したら毎回、送信後のスクショをチャットで見る」こと。
+# エージェントが Mac 側の作業フォルダから最新キャプチャを探す属人的な
+# 手順をやめ、送信成功時はプログラムが定位置へ保存してパスを返す。
+
+
+def screenshots_dir():
+    return os.environ.get("GUI_FLOW_SCREENSHOTS") or os.path.expanduser(
+        "~/workspace/mac-shots"
+    )
+
+
+def decode_b64_bytes(text):
+    """base64 テキスト (改行・空白混じり可) を bytes に戻す。失敗時は None。"""
+    if not text:
+        return None
+    try:
+        return base64.b64decode(re.sub(r"\s+", "", text), validate=True)
+    except ValueError:
+        return None
+
+
+def save_screenshot_file(app, png_bytes, now=None):
+    """送信後キャプチャを VM 側の定位置へ保存し、保存先パスを返す。
+
+    ファイル名は gui-flow-<app>-<YYYYMMDD-HHMMSS>.png (JST)。
+    """
+    now = now or datetime.now(JST)
+    d = screenshots_dir()
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, "gui-flow-%s-%s.png" % (app, now.strftime("%Y%m%d-%H%M%S")))
+    with open(path, "wb") as f:
+        f.write(png_bytes)
+    return path
 
 
 # --- SSH (ControlMaster 多重化) ----------------------------------------------
@@ -469,9 +510,16 @@ END { print line }'"""
 
 
 def build_verify_script(name, app, acfg):
-    """検閲フェーズ: ウィンドウ特定 → 撮影 → OCR。撮影はこの 1 回だけ。"""
+    """検閲フェーズ: ウィンドウ特定 → 撮影 → OCR。撮影はこの 1 回だけ。
+
+    撮影した PNG は base64 化したコピーも作り、呼び出し側が求めた場合に
+    テキスト経由で VM 側へ回収できるようにする (送信後スクショの受け渡し用)。
+    """
     parts = [HDR]
-    parts.append("rm -f ~/muse-tools/gf-out/__NAME__-ocr.txt")
+    parts.append(
+        "rm -f ~/muse-tools/gf-out/__NAME__-ocr.txt "
+        "~/muse-tools/gf-out/__NAME__-png.b64"
+    )
     parts.append('APP="%s"' % acfg["window_app"])
     parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
     parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
@@ -483,8 +531,37 @@ def build_verify_script(name, app, acfg):
         'say "status=capture_failed"; exit 0; fi'
     )
     parts.append(
+        "base64 -i ~/muse-tools/gf-out/__NAME__.png "
+        "> ~/muse-tools/gf-out/__NAME__-png.b64"
+    )
+    parts.append(
         "swift ~/muse-tools/ocr.swift ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-ocr.txt 2>&1"
+    )
+    parts.append('say "status=ok"')
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
+def build_capture_script(name, app, acfg):
+    """撮影だけのフェーズ: ウィンドウ特定 → 撮影 → base64 化。
+
+    単独 send の送信後スクショ用 (send には検閲フェーズが無いため)。
+    OCR はしない。
+    """
+    parts = [HDR]
+    parts.append('APP="%s"' % acfg["window_app"])
+    parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
+    parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
+    parts.append('say "window=$WIN"')
+    parts.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
+    parts.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
+    parts.append(
+        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
+        'say "status=capture_failed"; exit 0; fi'
+    )
+    parts.append(
+        "base64 -i ~/muse-tools/gf-out/__NAME__.png "
+        "> ~/muse-tools/gf-out/__NAME__-png.b64"
     )
     parts.append('say "status=ok"')
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
@@ -727,7 +804,7 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     if on_sent is not None:
         on_sent()
     time.sleep(1.0)
-    if not r.verify(text, "bubble"):
+    if not r.verify(text, "bubble", fetch_png=True):
         return False, "post_send_verify_failed", info
     return True, None, info
 
@@ -743,6 +820,7 @@ class Runner:
         self.steps = []
         self.checks = []
         self.counter = 0
+        self.last_png_bytes = None
 
     def _name(self, action):
         self.counter += 1
@@ -930,15 +1008,18 @@ class Runner:
         )
         return ok
 
-    def verify(self, text, mode):
+    def verify(self, text, mode, fetch_png=False):
         holder = {}
 
         def f():
             name = self._name("verify")
+            extras = ["-ocr.txt"]
+            if fetch_png:
+                extras.append("-png.b64")
             holder["res"] = self.mac.run_queue(
                 build_verify_script(name, self.app, self.acfg),
                 name,
-                extras=("-ocr.txt",),
+                extras=tuple(extras),
             )
             return holder["res"]
 
@@ -953,11 +1034,75 @@ class Runner:
                 }
             )
             return False
+        if fetch_png:
+            self.last_png_bytes = decode_b64_bytes(
+                res.get("_files", {}).get("-png.b64", "")
+            )
         win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
         ocr_text = res.get("_files", {}).get("-ocr.txt", "")
         vchecks = run_verify_checks(self.app, self.acfg, ocr_text, win, text, mode)
         self.checks.extend(vchecks)
         return all(c["ok"] for c in vchecks)
+
+    def capture_png(self):
+        """対象ウィンドウを撮影だけし、PNG を last_png_bytes に取り込む。
+
+        単独 send の送信後スクショ用。成功したら True。
+        """
+        name = self._name("capture")
+        res = self._timed(
+            "capture",
+            lambda: self.mac.run_queue(
+                build_capture_script(name, self.app, self.acfg),
+                name,
+                extras=("-png.b64",),
+            ),
+        )
+        if res.get("status") != "ok":
+            return False
+        self.last_png_bytes = decode_b64_bytes(
+            res.get("_files", {}).get("-png.b64", "")
+        )
+        return self.last_png_bytes is not None
+
+    def store_post_send_screenshot(self):
+        """送信成功後のキャプチャを VM 側の定位置へ保存する。
+
+        last_png_bytes (post の送信後検閲で撮影したもの) があればそれを、
+        無ければ capture_png() で撮り直して (単独 send 用) 保存する。
+        戻り値: 保存先パス or None。結果は checks の 'screenshot' に残す。
+        取得・保存に失敗しても例外は投げない (送信結果は成功のままにする)。
+        """
+        try:
+            if not self.last_png_bytes:
+                self.capture_png()
+            if not self.last_png_bytes:
+                self.checks.append(
+                    {
+                        "name": "screenshot",
+                        "ok": False,
+                        "evidence": "送信後キャプチャを取得できなかった",
+                    }
+                )
+                return None
+            path = save_screenshot_file(self.app, self.last_png_bytes)
+            self.checks.append(
+                {
+                    "name": "screenshot",
+                    "ok": True,
+                    "evidence": "送信後キャプチャを保存: %s" % path,
+                }
+            )
+            return path
+        except Exception as e:  # noqa: BLE001
+            self.checks.append(
+                {
+                    "name": "screenshot",
+                    "ok": False,
+                    "evidence": "スクショ保存に失敗: %s: %s" % (type(e).__name__, e),
+                }
+            )
+            return None
 
     def pre_send_once(self, text):
         """送信前の一巡: 入力 → 欄モード検閲。
@@ -1083,6 +1228,12 @@ def main():
         ok = False
         error = "%s: %s" % (type(e).__name__, e)
 
+    # 送信成功時だけ、送信後キャプチャを定位置へ保存してパスを返す。
+    # 失敗しても送信結果 (ok) は変えない (screenshot は null + checks に理由)。
+    screenshot = None
+    if ok and args.action in ("post", "send"):
+        screenshot = r.store_post_send_screenshot()
+
     out = {
         "ok": ok,
         "app": args.app,
@@ -1091,6 +1242,7 @@ def main():
         "steps": r.steps,
         "checks": r.checks,
         "retry": retry_info,
+        "screenshot": screenshot,
         "error": error,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))

@@ -3,9 +3,12 @@
 実行: python3 -m pytest tools/gui_flow/tests -q
 """
 
+import base64
 import json
 import os
+import re
 import sys
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -366,6 +369,7 @@ class FakeRunner:
         self.pre_calls = 0
         self.clear_calls = 0
         self.send_calls = 0
+        self.verify_fetch_png = None
 
     def pre_send_once(self, text):
         self.pre_calls += 1
@@ -379,8 +383,9 @@ class FakeRunner:
         self.send_calls += 1
         return self.send_ok
 
-    def verify(self, text, mode):
+    def verify(self, text, mode, fetch_png=False):
         assert mode == "bubble"
+        self.verify_fetch_png = fetch_png
         return self.bubble_ok
 
 
@@ -535,3 +540,118 @@ def test_build_readback_script_is_read_only():
     assert "keyf 8 cmd pid" in s  # コピー
     assert "$GH type" not in s  # 入力しない
     assert "keyf 51" not in s  # 消去しない
+
+
+# --- 送信後スクショの受け渡し -----------------------------------------------------
+
+FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-png-bytes"
+
+
+def _use_tmp_screenshots(tmp_path, monkeypatch):
+    monkeypatch.setenv("GUI_FLOW_SCREENSHOTS", str(tmp_path / "shots"))
+
+
+def test_decode_b64_bytes_roundtrip_and_failures():
+    enc = base64.b64encode(FAKE_PNG).decode("ascii")
+    wrapped = "\n".join(enc[i : i + 8] for i in range(0, len(enc), 8))
+    assert gui_flow.decode_b64_bytes(wrapped) == FAKE_PNG
+    assert gui_flow.decode_b64_bytes("") is None
+    assert gui_flow.decode_b64_bytes("!!!not-base64!!!") is None
+
+
+def test_save_screenshot_file_name_and_content(tmp_path, monkeypatch):
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    now = datetime(2026, 11, 3, 16, 7, 9, tzinfo=gui_flow.JST)
+    path = gui_flow.save_screenshot_file("discord", FAKE_PNG, now=now)
+    assert re.fullmatch(r".*/gui-flow-discord-20261103-160709\.png", path)
+    with open(path, "rb") as f:
+        assert f.read() == FAKE_PNG
+
+
+def test_verify_fetch_png_sets_last_png_bytes(monkeypatch):
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    canned = {
+        "status": "ok",
+        "pid": "1234",
+        "window": "767 0 30 1440 870",
+        "_files": {
+            "-ocr.txt": discord_ocr(),
+            "-png.b64": base64.b64encode(FAKE_PNG).decode("ascii"),
+        },
+        "_ssh_rc": 0,
+    }
+    seen = {}
+
+    def fake_run_queue(script, name, extras=()):
+        seen["extras"] = extras
+        return canned
+
+    monkeypatch.setattr(r.mac, "run_queue", fake_run_queue)
+    assert r.verify(DISCORD_TEXT, "bubble", fetch_png=True) is True
+    assert "-png.b64" in seen["extras"]
+    assert r.last_png_bytes == FAKE_PNG
+    # fetch_png=False のときは PNG を取りに行かない
+    r2 = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    monkeypatch.setattr(r2.mac, "run_queue", fake_run_queue)
+    assert r2.verify(DISCORD_TEXT, "bubble") is True
+    assert "-png.b64" not in seen["extras"]
+    assert r2.last_png_bytes is None
+
+
+def test_post_requests_png_on_bubble_verify(monkeypatch):
+    monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
+    fake = FakeRunner([PRE_PASS])
+    ok, error, _ = gui_flow.run_post(fake, "text")
+    assert ok is True
+    assert fake.verify_fetch_png is True
+
+
+def test_store_screenshot_success_with_preset_bytes(tmp_path, monkeypatch):
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "line")
+    r.last_png_bytes = FAKE_PNG
+    path = r.store_post_send_screenshot()
+    assert path is not None
+    assert re.search(r"gui-flow-line-\d{8}-\d{6}\.png$", path)
+    with open(path, "rb") as f:
+        assert f.read() == FAKE_PNG
+    shot = [c for c in r.checks if c["name"] == "screenshot"]
+    assert shot and shot[-1]["ok"] is True
+
+
+def test_store_screenshot_capture_failure_returns_none(monkeypatch, tmp_path):
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    canned = {"status": "window_not_found", "_files": {}, "_ssh_rc": 0}
+    monkeypatch.setattr(r.mac, "run_queue", lambda *a, **k: canned)
+    # 取得に失敗しても例外にならず None を返し、理由が checks に残る
+    assert r.store_post_send_screenshot() is None
+    shot = [c for c in r.checks if c["name"] == "screenshot"]
+    assert shot and shot[-1]["ok"] is False
+
+
+def test_store_screenshot_save_error_returns_none(monkeypatch, tmp_path):
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    r.last_png_bytes = FAKE_PNG
+
+    def boom(app, data, now=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gui_flow, "save_screenshot_file", boom)
+    # 保存に失敗しても例外は投げない (送信結果は成功のままにするため)
+    assert r.store_post_send_screenshot() is None
+    shot = [c for c in r.checks if c["name"] == "screenshot"]
+    assert shot and shot[-1]["ok"] is False
+    assert "disk full" in shot[-1]["evidence"]
+
+
+def test_build_verify_and_capture_scripts_png():
+    v = gui_flow.build_verify_script("gf-x.sh", "discord", DISCORD_CFG)
+    assert "-png.b64" in v  # 撮影した PNG の base64 コピーを作る
+    assert "base64 -i" in v  # macOS の base64 は -i 形式でないとファイルを読めない
+    c = gui_flow.build_capture_script("gf-x.sh", "discord", DISCORD_CFG)
+    assert "-png.b64" in c
+    assert "base64 -i" in c
+    assert "ocr.swift" not in c  # 撮影だけ (OCR はしない)
+    assert "window_not_found" in c
