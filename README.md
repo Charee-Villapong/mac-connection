@@ -12,7 +12,9 @@
   - screencheck-main … 画面キャプチャ（ScreenCaptureKit）
   - key-helper … キー送信（LINE の Cmd+Enter 送信など）
   - ocr … 画面の文字読み取り
+  - scroll … 指定座標でのスクロール
 - **scripts/** — 接続用スクリプト、作業ログ窓、省電力設定、OSアップデート用など
+  - 接続先などの実値はコードに直書きせず、.gitignore 対象の config.local.sh から読み込む構造（テンプレート config.local.example.sh のみ公開）
 - **guide/** — 設定ガイドの原稿（HTML）とプレビュー画像
 - **connectors/** — Mac のブラウザ操作（Playwright MCP）の接続メモ
 - スクリーンショット類は公開対象外（手元でのみ保管）

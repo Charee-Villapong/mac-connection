@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- gui-agent.sh を常駐させるための LaunchAgent テンプレート。
+     <ユーザー名> を自分の環境に置き換え、com.example.gui-agent の部分を
+     自分のラベルに変えて ~/Library/LaunchAgents/ に置く。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.gui-agent</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/zsh</string><string>/Users/<ユーザー名>/muse-tools/gui-agent.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>

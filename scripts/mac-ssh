@@ -1,7 +1,21 @@
 #!/bin/bash
-# SSH into the user's MacBook Air over Tailscale.
+# SSH into the user's MacBook Air over Tailscale.（公開用テンプレート）
+#
+# 接続先やユーザー名などの実値はコードに直書きせず、このスクリプトと
+# 同じフォルダの config.local.sh（.gitignore 対象・Git 管理外）から読み込む。
+# 使い方: config.local.example.sh を config.local.sh という名前でコピーし、
+# 自分の環境の値を入れてから使う。
+#
 # NOTE: the exec shell runs as root (HOME=/root), so the identity file must be given explicitly.
-exec ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes \
-  -o ProxyCommand="$HOME/workspace/.bin/ts-proxy.sh %h %p" \
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/config.local.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/config.local.sh"
+fi
+: "${MAC_SSH_USER:?config.local.sh で MAC_SSH_USER（SSHユーザー名）を設定してください}"
+: "${MAC_HOST:?config.local.sh で MAC_HOST（MacのTailscale IP等）を設定してください}"
+MAC_TS_PROXY="${MAC_TS_PROXY:-$SCRIPT_DIR/ts-proxy.sh}"
+exec ssh -i "$HOME/.ssh/id_ed25519" -o IdentitiesOnly=yes \
+  -o ProxyCommand="$MAC_TS_PROXY %h %p" \
   -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=25 \
-  <ユーザー名>@<MacのTailscale IP> "$@"
+  "$MAC_SSH_USER@$MAC_HOST" "$@"

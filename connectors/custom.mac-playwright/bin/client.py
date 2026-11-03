@@ -17,7 +17,7 @@ from pathlib import Path
 import sys
 import urllib.parse
 
-ENDPOINT_HOST = "100.x.x.x"  # 公開版では伏せています。実値に置き換えて使います
+ENDPOINT_HOST = os.environ.get("MAC_PLAYWRIGHT_HOST", "100.x.x.x")  # 実値は環境変数 MAC_PLAYWRIGHT_HOST で渡す（公開版の既定値は伏せ字）
 ENDPOINT_PORT = 8931
 ENDPOINT_PATH = "/mcp"
 

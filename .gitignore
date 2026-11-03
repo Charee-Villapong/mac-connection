@@ -1,11 +1,8 @@
 # secrets / local config (coding convention 2026-11-03)
 .env
 .env.*
-!.env.example
 config.local.*
-*.local.json
-*.local.yaml
-*.local.yml
+*.local.*
 secrets/
 *.pem
 *.key
@@ -13,3 +10,6 @@ id_rsa*
 id_ed25519*
 __pycache__/
 .DS_Store
+# templates for local config are published on purpose (negations must come last)
+!.env.example
+!config.local.example.sh
