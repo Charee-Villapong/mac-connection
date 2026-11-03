@@ -4,6 +4,8 @@
 config.local.*
 *.local.*
 secrets/
+# gui_flow approval records (local state, never published)
+tools/gui_flow/approvals/
 *.pem
 *.key
 id_rsa*

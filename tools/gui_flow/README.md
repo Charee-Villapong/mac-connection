@@ -13,6 +13,10 @@ cp config.example.json config.local.json   # 実値に書き換える
 ```
 
 ```bash
+# 本人の承認記録を作る (post / send の前に必須。Mac には接続しない)
+python3 gui_flow.py discord approve --text-file msg.txt
+python3 gui_flow.py line    approve --text-file msg.txt --expires 2026-11-05T13:00:00+09:00
+
 # 入力だけ (送信しない)
 python3 gui_flow.py discord input  --text-file msg.txt
 python3 gui_flow.py line    input  --text-file msg.txt
@@ -20,14 +24,14 @@ python3 gui_flow.py line    input  --text-file msg.txt
 # 最終検閲だけ (mode=field: 入力欄 / mode=bubble: 送信後の吹き出し)
 python3 gui_flow.py discord verify --mode field --text-file msg.txt
 
-# 入力 + 送信 + 送信後検閲まで通す
+# 入力 + 送信 + 送信後検閲まで通す (承認記録が無いと送信しない)
 python3 gui_flow.py discord post   --text-file msg.txt
 python3 gui_flow.py line    post   --text-file msg.txt
 
 # 実働テスト用: 入力 → 検閲 → 欄を空に戻す (送信はしない)
 python3 gui_flow.py discord test   --text-file msg.txt
 
-# 送信キーだけ / 欄を空にするだけ
+# 送信キーだけ (欄の文面に承認記録があるときだけ送る) / 欄を空にするだけ
 python3 gui_flow.py discord send
 python3 gui_flow.py discord clear
 ```
@@ -51,6 +55,12 @@ verify の 1 行目チェックもこの区別で実装しています。
 
 ## 安全原則
 
+- **承認ゲート（`post` / `send`）**: 「送信前の本人確認」をエージェントの注意力ではなくプログラムの構造で担保します。`approve` で作成した承認記録（文面の SHA-256 + アプリ + 宛先に紐づき、有効期限・使用済みフラグを持つ）が無い文面は送信できません。
+  - `post` は接続後・入力前に照合し、記録が無い／期限切れ／使用済みの場合は `approval_missing`（理由つき）で停止します。入力欄には一切触りません。
+  - `send` は欄の文面を読み戻し、その文面の承認があるときだけ送信キーを押します。
+  - 送信が成功したら承認記録を使用済みにします（同じ承認で二重送信できません）。送信前検閲で止まった場合は消費しません。
+  - 有効期限の既定は作成から 24 時間です。`--expires` で ISO8601 指定もできます（オフセット無しは JST とみなします）。文面のハッシュは前後の空白・改行を除いた本文に対して計算します。
+  - 承認記録はローカル状態として `tools/gui_flow/approvals/` に置き、git 管理外です。
 - 異常（宛先不一致 / 入力欄に残りあり / ウィンドウが見つからない / 画面が読めないなど）を検知したら、**送信せずに停止**し、結果 JSON で報告します。
 - `post` は送信前検閲（入力の読み戻し照合 + 欄の OCR 照合）の全チェックが合格したときだけ送信キーに進みます。
 - **高速リトライ（`post` のみ）**: 送信前検閲が「本文の不一致」（読み戻し不一致・行単位照合 NG など）だけで落ちた場合は、慎重プロセスへ落とす前に、プログラム内で自動リトライします。手順は「入力欄を全消去（消すのはこの run で自分が入力した分だけ）→ 同じ文面を再入力 → 再検閲」で、最大 2 回までです。合格すればそのまま送信へ進み、2 回とも NG なら停止して報告します。リトライ 1 回の追加時間は実測で Discord 約 25 秒 / LINE 約 22 秒です。

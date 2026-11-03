@@ -431,3 +431,107 @@ def test_post_recipient_mismatch_never_retries(monkeypatch):
     assert fake.pre_calls == 1
     assert fake.clear_calls == 0
     assert fake.send_calls == 0
+
+
+def test_post_calls_on_sent_once_after_send(monkeypatch):
+    monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
+    calls = []
+    fake = FakeRunner([PRE_PASS])
+    ok, error, _ = gui_flow.run_post(fake, "text", on_sent=lambda: calls.append(1))
+    assert ok is True
+    assert calls == [1]
+    # 送信に進まなかった場合は呼ばれない (承認を消費しない)
+    fake2 = FakeRunner([PRE_STOP])
+    ok, error, _ = gui_flow.run_post(fake2, "text", on_sent=lambda: calls.append(1))
+    assert ok is False
+    assert calls == [1]
+
+
+# --- 承認ゲート -----------------------------------------------------------------
+
+
+def _use_tmp_approvals(tmp_path, monkeypatch):
+    monkeypatch.setenv("GUI_FLOW_APPROVALS", str(tmp_path / "approvals"))
+
+
+def test_approval_create_and_check_ok(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    rec = gui_flow.create_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert rec["used"] is False
+    assert rec["recipient"] == "example-dm"
+    stored = tmp_path / "approvals" / (rec["text_sha256"] + ".json")
+    assert stored.exists()
+    ok, reason, found = gui_flow.check_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert ok is True
+    assert reason == "ok"
+    assert found["text_sha256"] == rec["text_sha256"]
+
+
+def test_approval_missing_without_record(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    ok, reason, found = gui_flow.check_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert ok is False
+    assert reason == "missing"
+    assert found is None
+
+
+def test_approval_hash_mismatch_stops(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    gui_flow.create_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    ok, reason, _ = gui_flow.check_approval("discord", DISCORD_CFG, LINE_TEXT)
+    assert ok is False
+    assert reason == "missing"
+
+
+def test_approval_expired_stops(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    gui_flow.create_approval(
+        "discord", DISCORD_CFG, DISCORD_TEXT, expires="2020-01-01T00:00:00+09:00"
+    )
+    ok, reason, _ = gui_flow.check_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert ok is False
+    assert reason == "expired"
+
+
+def test_approval_used_cannot_be_reused(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    gui_flow.create_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert gui_flow.consume_approval("discord", DISCORD_CFG, DISCORD_TEXT) is True
+    ok, reason, _ = gui_flow.check_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    assert ok is False
+    assert reason == "used"
+    # 使用済みの記録は二度と消費できない
+    assert gui_flow.consume_approval("discord", DISCORD_CFG, DISCORD_TEXT) is False
+
+
+def test_approval_recipient_mismatch_stops(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    gui_flow.create_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    other = dict(DISCORD_CFG, recipient_aliases=["another-dm"])
+    ok, reason, _ = gui_flow.check_approval("discord", other, DISCORD_TEXT)
+    assert ok is False
+    assert reason == "mismatch"
+
+
+def test_runner_gate_blocks_then_passes(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    ok, reason = r.check_approval(DISCORD_TEXT)
+    assert ok is False
+    assert reason == "missing"
+    assert r.checks[-1]["name"] == "approval"
+    assert r.checks[-1]["ok"] is False
+    gui_flow.create_approval("discord", DISCORD_CFG, DISCORD_TEXT)
+    ok, reason = r.check_approval(DISCORD_TEXT)
+    assert ok is True
+    assert reason == "ok"
+    assert r.checks[-1]["ok"] is True
+
+
+def test_build_readback_script_is_read_only():
+    s = gui_flow.build_readback_script("gf-x.sh", "line", LINE_CFG)
+    assert "status=field_empty" in s
+    assert "keyf 0 cmd pid" in s  # 全選択
+    assert "keyf 8 cmd pid" in s  # コピー
+    assert "$GH type" not in s  # 入力しない
+    assert "keyf 51" not in s  # 消去しない

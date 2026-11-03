@@ -8,6 +8,7 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
 ステップ判断と Mac との往復は、すべてこのプログラムの内部に閉じ込める。
 
 使い方:
+  gui_flow.py discord approve --text-file msg.txt [--expires <ISO8601>]
   gui_flow.py discord input  --text-file msg.txt
   gui_flow.py discord verify --mode field  --text-file msg.txt
   gui_flow.py discord send
@@ -29,6 +30,11 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
 安全原則:
   - 異常 (宛先不一致 / 欄に残りあり / ウィンドウなし / 照合不一致など) を
     検知したら送信せずに停止し、結果 JSON で報告する。
+  - 承認ゲート: post / send は、本人が文面を承認した記録 (承認記録) が
+    無ければ送信しない。承認記録は approve サブコマンドで作成し、
+    文面ハッシュ + アプリ + 宛先に紐づく。有効期限 (既定 24 時間) 内の
+    未使用の記録だけが有効で、送信が成功したら使用済みにする
+    (同じ承認で二重送信できない)。
   - post は送信前検閲 (入力 + 欄の OCR 照合) が全て合格したときだけ
     送信キーに進む。
   - 送信前検閲が「本文の不一致」だけで落ちた場合に限り、post は欄を
@@ -44,6 +50,7 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
 import argparse
 import base64
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -51,6 +58,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -75,6 +83,10 @@ MAX_PRE_SEND_RETRIES = 2
 # 送信前検閲で「本文の不一致」とみなし、高速リトライを許可するチェック名。
 # これ以外のチェック (宛先・構造・撮影可否など) が 1 つでも落ちたら即停止する。
 RETRYABLE_CHECKS = {"readback_match", "body_match", "field_state", "first_line"}
+# 承認記録の有効期限 (既定)。approve --expires で明示指定もできる。
+APPROVAL_DEFAULT_TTL = timedelta(hours=24)
+# --expires にオフセットが無い場合は JST とみなす。
+JST = timezone(timedelta(hours=9))
 
 
 # --- 設定 -------------------------------------------------------------------
@@ -89,6 +101,111 @@ def load_config():
         )
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+# --- 承認記録 (承認ゲート) ---------------------------------------------------
+# 「送信前の本人確認」をエージェント側の注意力ではなくプログラムの構造で
+# 担保する。approve で文面ごとの承認記録を作り、post / send は記録が
+# 無ければ送信キーに進まない。記録はローカル状態 (git 管理外) に置く。
+
+
+def approvals_dir():
+    return os.environ.get("GUI_FLOW_APPROVALS") or os.path.join(HERE, "approvals")
+
+
+def canonical_text(text):
+    """承認ハッシュ用の正規化: 前後の空白・改行を除く。"""
+    return (text or "").strip()
+
+
+def text_sha256(text):
+    return hashlib.sha256(canonical_text(text).encode("utf-8")).hexdigest()
+
+
+def recipient_key(acfg):
+    """宛先の識別子 (config の宛先エイリアスの先頭)。"""
+    aliases = acfg.get("recipient_aliases", [])
+    return aliases[0] if aliases else ""
+
+
+def _parse_dt(s):
+    dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=JST)
+    return dt
+
+
+def _approval_path(sha):
+    return os.path.join(approvals_dir(), sha + ".json")
+
+
+def _write_record(rec):
+    path = _approval_path(rec["text_sha256"])
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def create_approval(app, acfg, text, expires=None, now=None):
+    """承認記録を作成 (既存の同文面の記録があれば作り直す) し、記録を返す。"""
+    now = now or datetime.now(timezone.utc)
+    exp_dt = _parse_dt(expires) if expires else now + APPROVAL_DEFAULT_TTL
+    rec = {
+        "app": app,
+        "recipient": recipient_key(acfg),
+        "text_sha256": text_sha256(text),
+        "created_at": now.isoformat(),
+        "expires_at": exp_dt.isoformat(),
+        "used": False,
+        "used_at": None,
+    }
+    os.makedirs(approvals_dir(), exist_ok=True)
+    _write_record(rec)
+    return rec
+
+
+def check_approval(app, acfg, text, now=None):
+    """承認記録を照合する。
+
+    戻り値: (ok, reason, record)
+    reason は ok / missing (記録なし・文面不一致) / mismatch (アプリ・宛先が
+    違う) / used (使用済み) / expired (期限切れ) のいずれか。
+    """
+    now = now or datetime.now(timezone.utc)
+    path = _approval_path(text_sha256(text))
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return False, "missing", None
+    if rec.get("app") != app or rec.get("recipient") != recipient_key(acfg):
+        return False, "mismatch", rec
+    if rec.get("used"):
+        return False, "used", rec
+    if now > _parse_dt(rec["expires_at"]):
+        return False, "expired", rec
+    return True, "ok", rec
+
+
+def consume_approval(app, acfg, text, now=None):
+    """承認記録を使用済みにする。照合に失敗したら何もせず False を返す。"""
+    ok, _, rec = check_approval(app, acfg, text, now=now)
+    if not ok:
+        return False
+    rec = dict(rec)
+    rec["used"] = True
+    rec["used_at"] = (now or datetime.now(timezone.utc)).isoformat()
+    _write_record(rec)
+    return True
+
+
+APPROVAL_REASON_JA = {
+    "missing": "承認記録がない (未承認の文面)",
+    "mismatch": "承認記録のアプリ・宛先が一致しない",
+    "used": "承認記録は使用済み",
+    "expired": "承認記録の有効期限切れ",
+}
 
 
 # --- SSH (ControlMaster 多重化) ----------------------------------------------
@@ -301,6 +418,37 @@ def build_clear_script(name, app, acfg):
         'if [ "$PB" = "$SENT" ]; then say "field_empty=yes"; say "status=ok"; '
         'else say "field_empty=no"; say "status=fail_not_empty"; fi'
     )
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
+def build_readback_script(name, app, acfg):
+    """読み戻し専用フェーズ: 前面化 → 欄クリック → 全選択コピー → 回収。
+
+    入力も消去もしない。send の承認ゲートで「今欄に入っている文面」を
+    特定するために使う。
+    """
+    parts = [HDR]
+    parts.append("rm -f ~/muse-tools/gf-out/__NAME__-field.txt")
+    parts.append('open -a "%s"' % acfg["app_name"])
+    parts.append("sleep 0.8")
+    if acfg.get("nav_click"):
+        parts.append("$GH click %d %d" % tuple(acfg["nav_click"]))
+        parts.append("sleep 0.5")
+    parts.append("PID=$(pgrep -x %s | head -1)" % acfg["process"])
+    parts.append('say "pid=$PID"')
+    parts.append('if [ -z "$PID" ]; then say "status=app_not_running"; exit 0; fi')
+    parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
+    parts.append("sleep 0.4")
+    parts.append('SENT="GF_SENT_R_3b77"')
+    parts.append('printf %s "$SENT" | pbcopy')
+    parts.append("$KH keyf 0 cmd pid $PID")
+    parts.append("sleep 0.25")
+    parts.append("$KH keyf 8 cmd pid $PID")
+    parts.append("sleep 0.3")
+    parts.append("PB=$(pbpaste)")
+    parts.append('if [ "$PB" = "$SENT" ]; then say "status=field_empty"; exit 0; fi')
+    parts.append('printf %s "$PB" > ~/muse-tools/gf-out/__NAME__-field.txt')
+    parts.append('say "status=ok"')
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
 
@@ -542,12 +690,14 @@ def classify_pre_send(checks):
     return True, retryable, names, summary[:300]
 
 
-def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES):
+def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     """post フロー: 送信前 (入力 + 欄検閲) → 送信 → 送信後検閲。
 
     送信前が「本文の不一致」だけで落ちた場合に限り、欄を全消去して
     再入力する高速リトライを最大 max_retries 回まで行う。それ以外の
     異常はリトライせず即停止する。送信後検閲 NG は送り直さない。
+    on_sent は送信キーが成功した直後に 1 回だけ呼ばれる (承認の消費用)。
+    承認ゲート自体は呼び出し側 (main) が開始前に済ませる。
 
     戻り値: (ok, error, retry_info)
     retry_info = {"count": リトライ実施回数,
@@ -574,6 +724,8 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES):
     info = {"count": retries_done, "attempts": attempts}
     if not r.send():
         return False, "send_failed", info
+    if on_sent is not None:
+        on_sent()
     time.sleep(1.0)
     if not r.verify(text, "bubble"):
         return False, "post_send_verify_failed", info
@@ -697,6 +849,67 @@ class Runner:
         )
         return ok
 
+    def readback_field(self):
+        """入力欄の現在の文面を読み戻す (入力・消去はしない)。
+
+        成功したら文面、読めなければ None を返し、結果を checks に積む。
+        """
+        name = self._name("readback")
+        res = self._timed(
+            "readback",
+            lambda: self.mac.run_queue(
+                build_readback_script(name, self.app, self.acfg),
+                name,
+                extras=("-field.txt",),
+            ),
+        )
+        st = res.get("status", "no_result")
+        if st != "ok":
+            self.checks.append(
+                {
+                    "name": "field_readback",
+                    "ok": False,
+                    "evidence": "欄の読み戻し不可: status=%s" % st,
+                }
+            )
+            return None
+        txt = res.get("_files", {}).get("-field.txt", "")
+        self.checks.append(
+            {
+                "name": "field_readback",
+                "ok": True,
+                "evidence": "欄の読み戻し取得 (%d 字)" % len(txt.strip()),
+            }
+        )
+        return txt
+
+    def check_approval(self, text):
+        """承認ゲートの照合。結果を checks に積み、(ok, reason) を返す。"""
+        ok, reason, rec = check_approval(self.app, self.acfg, text)
+        if ok:
+            ev = "承認記録あり (id=%s, 期限 %s)" % (
+                rec["text_sha256"][:12],
+                rec["expires_at"],
+            )
+        else:
+            ev = "承認ゲート停止: %s" % APPROVAL_REASON_JA.get(reason, reason)
+        self.checks.append({"name": "approval", "ok": ok, "evidence": ev})
+        return ok, reason
+
+    def consume_approval(self, text):
+        """送信成功後に承認記録を使用済みにし、二重送信を防ぐ。"""
+        done = consume_approval(self.app, self.acfg, text)
+        self.checks.append(
+            {
+                "name": "approval_consumed",
+                "ok": done,
+                "evidence": (
+                    "承認記録を使用済みにした" if done else "承認記録の消費に失敗"
+                ),
+            }
+        )
+        return done
+
     def clear(self):
         name = self._name("clear")
         res = self._timed(
@@ -777,16 +990,47 @@ def main():
     ap = argparse.ArgumentParser(description="LINE/Discord GUI flow (one-shot)")
     ap.add_argument("app", choices=["discord", "line"])
     ap.add_argument(
-        "action", choices=["input", "verify", "send", "clear", "post", "test"]
+        "action",
+        choices=["approve", "input", "verify", "send", "clear", "post", "test"],
     )
     ap.add_argument("--text")
     ap.add_argument("--text-file")
     ap.add_argument("--mode", choices=["field", "bubble"], default="field")
+    ap.add_argument(
+        "--expires",
+        help="approve の有効期限 (ISO8601。オフセット無しは JST とみなす)",
+    )
     args = ap.parse_args()
 
     cfg = load_config()
-    r = Runner(cfg, args.app)
     t0 = time.time()
+
+    # approve は Mac に接続しない (承認記録を作るだけ)。
+    if args.action == "approve":
+        text = read_text(args)
+        rec = create_approval(
+            args.app, cfg["apps"][args.app], text, expires=args.expires
+        )
+        out = {
+            "ok": True,
+            "app": args.app,
+            "action": "approve",
+            "total_sec": round(time.time() - t0, 2),
+            "approval": {
+                "id": rec["text_sha256"][:12],
+                "text_sha256": rec["text_sha256"],
+                "app": rec["app"],
+                "recipient": rec["recipient"],
+                "created_at": rec["created_at"],
+                "expires_at": rec["expires_at"],
+                "used": rec["used"],
+            },
+            "error": None,
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        sys.exit(0)
+
+    r = Runner(cfg, args.app)
     ok = True
     error = None
     retry_info = None
@@ -799,12 +1043,33 @@ def main():
         elif args.action == "verify":
             ok = r.verify(read_text(args), args.mode)
         elif args.action == "send":
-            ok = r.send()
+            # 承認ゲート: 欄の文面を読み戻し、その文面の承認があるときだけ送る。
+            field_text = r.readback_field()
+            if field_text is None:
+                ok = False
+                error = "field_readback_failed"
+            else:
+                gate_ok, _ = r.check_approval(field_text)
+                if not gate_ok:
+                    ok = False
+                    error = "approval_missing"
+                else:
+                    ok = r.send()
+                    if ok:
+                        r.consume_approval(field_text)
         elif args.action == "clear":
             ok = r.clear()
         elif args.action == "post":
             text = read_text(args)
-            ok, error, retry_info = run_post(r, text)
+            # 承認ゲート: 接続後・入力前に照合する。落ちたら欄に一切触らない。
+            gate_ok, _ = r.check_approval(text)
+            if not gate_ok:
+                ok = False
+                error = "approval_missing"
+            else:
+                ok, error, retry_info = run_post(
+                    r, text, on_sent=lambda: r.consume_approval(text)
+                )
         elif args.action == "test":
             text = read_text(args)
             in_ok = r.input(text)
