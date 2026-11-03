@@ -57,7 +57,10 @@ python3 ~/workspace/custom-connectors/custom.mac-playwright/bin/client.py run-ba
   in the profile; open pages do not.
 - The client reaches the endpoint through the runtime proxy on port 3130
   (the Tailscale tunnel), reading proxy credentials from `HTTPS_PROXY` at
-  runtime. Nothing secret is stored in the client. The first request to
+  runtime. Nothing secret is stored in the client. In this published copy,
+  the endpoint host is likewise kept out of the code: `client.py` reads it
+  from the `MAC_PLAYWRIGHT_HOST` environment variable, and the in-code
+  default is a masked placeholder. The first request to
   the Mac's address may pause for the user's tunnel approval; wait for it
   instead of retrying.
 - 23 tools are allow-listed in `client.py` (navigation, snapshot, click,
