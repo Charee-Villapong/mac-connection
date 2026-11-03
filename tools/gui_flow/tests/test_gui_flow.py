@@ -791,6 +791,19 @@ def test_probe_script_never_sends():
         assert ccfg["probe_text"] in s
 
 
+def test_probe_script_candidates_are_literal_calls():
+    # キュー実行シェル (zsh) では変数の単語分割が効かないため、候補は
+    # set -- $CANDS のような分割依存で渡さず、リテラル引数で 1 点ずつ呼ぶ。
+    ccfg = gui_flow.careful_cfg("discord", DISCORD_CFG)
+    pts = gui_flow.probe_candidates(WIN[1:], DISCORD_CFG, ccfg)
+    s = gui_flow.build_probe_script("gf-x.sh", "discord", DISCORD_CFG, pts, "PROBE")
+    assert "set --" not in s
+    assert "CANDS" not in s
+    assert "try_one() {" in s
+    calls = [ln for ln in s.splitlines() if ln.startswith("try_one ")]
+    assert calls == ["try_one %d %d" % p for p in pts]
+
+
 # --- 学習の保存 -----------------------------------------------------------------
 
 

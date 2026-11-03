@@ -679,7 +679,6 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     (このスクリプトに送信キーの呼び出しは含まれない)。
     欄に既存の残りがある場合は anomaly_leftover として何も触らず停止する。
     """
-    flat = " ".join("%d %d" % (int(x), int(y)) for x, y in candidates)
     parts = [HDR]
     parts.append(
         "rm -f ~/muse-tools/gf-out/__NAME__-leftover.txt "
@@ -709,11 +708,13 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     parts.append("  exit 0")
     parts.append("fi")
     parts.append('PROBE="%s"' % probe_text)
-    parts.append('CANDS="%s"' % flat)
-    parts.append("set -- $CANDS")
     parts.append("IDX=0; TRIED=0; HIT=-1; HX=; HY=")
-    parts.append("while [ $# -ge 2 ]; do")
-    parts.append("  CX=$1; CY=$2; shift 2")
+    # 候補は関数 try_one へのリテラル引数呼び出しで 1 点ずつ試す。
+    # 変数の単語分割 (set -- $CANDS) はキュー実行シェル (zsh) では効かず
+    # (分割されないため $# が 1 になりループが空転する)、使わない。
+    parts.append("try_one() {")
+    parts.append("  if [ $HIT -ge 0 ]; then return 0; fi")
+    parts.append("  CX=$1; CY=$2")
     parts.append("  TRIED=$((TRIED+1))")
     parts.append("  $GH click $CX $CY")
     parts.append("  sleep 0.35")
@@ -729,9 +730,11 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     parts.append("  sleep 0.15")
     parts.append("  $KH keyf 51 - pid $PID")
     parts.append("  sleep 0.2")
-    parts.append('  if [ "$PB" = "$PROBE" ]; then HIT=$IDX; HX=$CX; HY=$CY; break; fi')
+    parts.append('  if [ "$PB" = "$PROBE" ]; then HIT=$IDX; HX=$CX; HY=$CY; fi')
     parts.append("  IDX=$((IDX+1))")
-    parts.append("done")
+    parts.append("}")
+    for x, y in candidates:
+        parts.append("try_one %d %d" % (int(x), int(y)))
     parts.append('say "probe_tried=$TRIED"')
     parts.append('say "probe_hit=$HIT"')
     parts.append('if [ $HIT -ge 0 ]; then say "probe_point=$HX $HY"; fi')
