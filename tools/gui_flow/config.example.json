@@ -24,7 +24,9 @@
         "self_check_text": "",
         "dismiss_retries": 1,
         "dismiss_click_x_ratio": 0.5,
-        "dismiss_click_y_offset": 16
+        "dismiss_click_y_offset": 16,
+        "dismiss_thumb_width": 160,
+        "dismiss_change_threshold": 0.005
       },
       "field_from_bottom": 90,
       "header_band": 110,
@@ -72,7 +74,9 @@
         "self_check_text": "",
         "dismiss_retries": 1,
         "dismiss_click_x_ratio": 0.5,
-        "dismiss_click_y_offset": 16
+        "dismiss_click_y_offset": 16,
+        "dismiss_thumb_width": 160,
+        "dismiss_change_threshold": 0.005
       },
       "field_from_bottom": 160,
       "header_band": 110,

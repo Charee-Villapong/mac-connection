@@ -72,10 +72,12 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import time
 import unicodedata
+import zlib
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -167,6 +169,8 @@ CAREFUL_BASE_DEFAULTS = {
     "dismiss_retries": 1,  # 解消 → 再プローブの試行回数
     "dismiss_click_x_ratio": 0.5,  # 外側クリックの横位置 (フレーム幅比)
     "dismiss_click_y_offset": 16,  # 外側クリックの縦位置 (フレーム上端から px)
+    "dismiss_thumb_width": 160,  # 再確認用サムネイルの幅 (px)
+    "dismiss_change_threshold": 0.005,  # 「画面が変わった」とみなす差分比率
 }
 
 # アプリ別の既定値 (入力欄の縦位置はアプリで大きく異なるため分ける)
@@ -391,6 +395,104 @@ def decode_b64_bytes(text):
         return base64.b64decode(re.sub(r"\s+", "", text), validate=True)
     except ValueError:
         return None
+
+
+def _png_gray_rows(data):
+    """PNG (8bit・RGB/RGBA・非インターレース) をグレースケール行列にする。
+
+    対応外の形式・破損データでは None。覆い解消前後の画面差分を取る
+    ための最小実装 (サムネイル前提)。
+    """
+    if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    try:
+        pos = 8
+        idat = b""
+        w = h = None
+        bpp = 0
+        while pos + 8 <= len(data):
+            size = struct.unpack(">I", data[pos : pos + 4])[0]
+            ctype = data[pos + 4 : pos + 8]
+            chunk = data[pos + 8 : pos + 8 + size]
+            if ctype == b"IHDR":
+                w, h, depth, color, _comp, _filt, inter = struct.unpack(
+                    ">IIBBBBB", chunk
+                )
+                if depth != 8 or inter != 0 or color not in (2, 6):
+                    return None
+                bpp = 3 if color == 2 else 4
+            elif ctype == b"IDAT":
+                idat += chunk
+            pos += 12 + size
+        if w is None or not idat:
+            return None
+        raw = zlib.decompress(idat)
+        stride = w * bpp
+        rows = []
+        prev = bytearray(stride)
+        i = 0
+        for _y in range(h):
+            filt = raw[i]
+            i += 1
+            line = bytearray(raw[i : i + stride])
+            i += stride
+            if filt == 1:
+                for x in range(bpp, stride):
+                    line[x] = (line[x] + line[x - bpp]) & 0xFF
+            elif filt == 2:
+                for x in range(stride):
+                    line[x] = (line[x] + prev[x]) & 0xFF
+            elif filt == 3:
+                for x in range(stride):
+                    left = line[x - bpp] if x >= bpp else 0
+                    line[x] = (line[x] + ((left + prev[x]) >> 1)) & 0xFF
+            elif filt == 4:
+                for x in range(stride):
+                    a = line[x - bpp] if x >= bpp else 0
+                    b = prev[x]
+                    c = prev[x - bpp] if x >= bpp else 0
+                    p = a + b - c
+                    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                    pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                    line[x] = (line[x] + pr) & 0xFF
+            elif filt != 0:
+                return None
+            rows.append(
+                [
+                    (line[x] * 30 + line[x + 1] * 59 + line[x + 2] * 11) // 100
+                    for x in range(0, stride, bpp)
+                ]
+            )
+            prev = line
+        return w, h, rows
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def png_diff_ratio(data_a, data_b, pixel_threshold=24):
+    """2 枚の PNG で大きく変わったピクセルの比率 (0.0–1.0)。
+
+    サイズが違えば 1.0、判定不能なら None。覆いの解消前後で「画面が
+    クリーンになったか」を確認するために使う。
+    """
+    a = _png_gray_rows(data_a)
+    b = _png_gray_rows(data_b)
+    if a is None or b is None:
+        return None
+    wa, ha, ra = a
+    wb, hb, rb = b
+    if (wa, ha) != (wb, hb):
+        return 1.0
+    total = wa * ha
+    if total == 0:
+        return None
+    diff = 0
+    for y in range(ha):
+        row_a, row_b = ra[y], rb[y]
+        for x in range(wa):
+            if abs(row_a[x] - row_b[x]) > pixel_threshold:
+                diff += 1
+    return diff / total
 
 
 def save_screenshot_file(app, png_bytes, now=None):
@@ -857,6 +959,38 @@ def build_capture_script(name, app, acfg):
     parts.append(
         "base64 -i ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-png.b64"
+    )
+    parts.append('say "status=ok"')
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
+def build_snapshot_script(name, app, acfg, width):
+    """画面確認用の軽量撮影: ウィンドウ撮影 → サムネイル化 → base64。
+
+    覆いの解消前後で画面が変わったか (クリーンになったか) を比べる
+    ためのもの。OCR はしない。
+    """
+    parts = [HDR]
+    parts.append('APP="%s"' % acfg["window_app"])
+    parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
+    parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
+    parts.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
+    parts.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
+    parts.append(
+        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
+        'say "status=capture_failed"; exit 0; fi'
+    )
+    parts.append(
+        "sips -Z %d ~/muse-tools/gf-out/__NAME__.png "
+        "--out ~/muse-tools/gf-out/__NAME__-thumb.png >/dev/null 2>&1" % int(width)
+    )
+    parts.append(
+        "if [ ! -s ~/muse-tools/gf-out/__NAME__-thumb.png ]; then "
+        'say "status=thumb_failed"; exit 0; fi'
+    )
+    parts.append(
+        "base64 -i ~/muse-tools/gf-out/__NAME__-thumb.png "
+        "> ~/muse-tools/gf-out/__NAME__-thumb.b64"
     )
     parts.append('say "status=ok"')
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
@@ -1649,17 +1783,72 @@ class Runner:
         )
         return st == "ok"
 
-    def _probe_after_dismiss(self, candidates, frame, ccfg, res):
-        """プローブが probe_no_hit のとき: 汎用解消 → 再プローブを行う。
+    def snapshot_thumb(self, ccfg):
+        """画面確認用のサムネイル (PNG bytes)。失敗時は None。"""
+        name = self._name("snapshot")
+        res = self._timed(
+            "snapshot",
+            lambda: self.mac.run_queue(
+                build_snapshot_script(
+                    name, self.app, self.acfg, ccfg["dismiss_thumb_width"]
+                ),
+                name,
+                extras=("-thumb.b64",),
+            ),
+        )
+        if res.get("status") != "ok":
+            return None
+        return decode_b64_bytes(res.get("_files", {}).get("-thumb.b64", ""))
 
-        想定外の覆い (ポップアップ等) で入力欄に到達できていない疑い
-        として扱う。解消できれば解消後のプローブ結果を返し、できなけ
-        れば overlay_blocked を立てて最後の結果を返す (無理に進めない)。
+    def _probe_after_dismiss(self, candidates, frame, ccfg, res):
+        """分類→対処: 覆いの疑い (probe_no_hit) への対処。
+
+        対処は「汎用解消 → 画面がクリーンになったかの再確認 (解消前後の
+        サムネイル差分) → 再プローブ」。再確認で変化が無ければ覆いが
+        残っているとみなし、再プローブせず停止側に落とす。試行回数は
+        dismiss_retries で上限を設ける (無限ループ防止)。解消できれば
+        解消後のプローブ結果を返し、できなければ overlay_blocked を
+        立てて最後の結果を返す (無理に進めない)。
         """
+        self.checks.append(
+            {
+                "name": "anomaly_class",
+                "ok": True,
+                "evidence": "異常の種類: 覆いの疑い (入力欄に到達できず) "
+                "→ 対処: 汎用解消 + 再確認 + 再プローブ",
+            }
+        )
         for _ in range(max(0, int(ccfg["dismiss_retries"]))):
+            before = self.snapshot_thumb(ccfg)
             if not self.dismiss_overlay(frame, ccfg):
                 break
             self.careful_capture("overlay-dismissed")
+            after = self.snapshot_thumb(ccfg)
+            ratio = (
+                png_diff_ratio(before, after)
+                if before is not None and after is not None
+                else None
+            )
+            if ratio is not None:
+                clean = ratio > float(ccfg["dismiss_change_threshold"])
+                self.checks.append(
+                    {
+                        "name": "overlay_clean",
+                        "ok": clean,
+                        "evidence": "解消前後の画面差分 %.4f (しきい値 %.4f): %s"
+                        % (
+                            ratio,
+                            float(ccfg["dismiss_change_threshold"]),
+                            (
+                                "変化あり (クリーンと確認)"
+                                if clean
+                                else "変化なし (覆いが残っている疑い)"
+                            ),
+                        ),
+                    }
+                )
+                if not clean:
+                    break
             res = self.probe(candidates, ccfg)
             if res["status"] != "probe_no_hit":
                 break

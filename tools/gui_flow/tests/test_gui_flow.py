@@ -888,6 +888,68 @@ def test_careful_overlay_unresolved_stops(tmp_path, monkeypatch):
     assert not learned_file.exists()
 
 
+def _tiny_png(rows):
+    """テスト用の最小 PNG (RGB・フィルタなし)。rows は (r, g, b) の行列。"""
+    import struct as _struct
+    import zlib as _zlib
+
+    h = len(rows)
+    w = len(rows[0])
+    raw = b""
+    for row in rows:
+        raw += b"\x00" + b"".join(bytes(px) for px in row)
+
+    def chunk(typ, data):
+        c = _struct.pack(">I", len(data)) + typ + data
+        return c + _struct.pack(">I", _zlib.crc32(typ + data) & 0xFFFFFFFF)
+
+    ihdr = _struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", _zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_png_diff_ratio():
+    black = [[(0, 0, 0)] * 4 for _ in range(4)]
+    half_white = [[(255, 255, 255)] * 2 + [(0, 0, 0)] * 2 for _ in range(4)]
+    a = _tiny_png(black)
+    assert gui_flow.png_diff_ratio(a, a) == 0.0
+    assert gui_flow.png_diff_ratio(a, _tiny_png(half_white)) == 0.5
+    assert gui_flow.png_diff_ratio(a, _tiny_png([[(0, 0, 0)] * 2])) == 1.0
+    assert gui_flow.png_diff_ratio(b"not a png", a) is None
+    assert gui_flow.png_diff_ratio(None, a) is None
+
+
+def test_careful_overlay_screen_unchanged_stops(tmp_path, monkeypatch):
+    # 解消しても画面が変わらなければ「覆いが残っている」とみなし、
+    # 再プローブせず停止する (再確認ステップの異常系)
+    r, cfg_file, learned_file = _careful_runner(tmp_path, monkeypatch, _no_hit())
+    thumb = _tiny_png([[(10, 10, 10)] * 4 for _ in range(4)])
+    r.snapshot_thumb = lambda ccfg: thumb
+    calls = {"probe": 0, "dismiss": 0}
+
+    def probe(candidates, ccfg):
+        calls["probe"] += 1
+        return _no_hit()
+
+    def dismiss(frame, ccfg):
+        calls["dismiss"] += 1
+        return True
+
+    r.probe = probe
+    r.dismiss_overlay = dismiss
+    ok, learned, self_check_ok = r.careful()
+    assert ok is False
+    assert calls == {"probe": 1, "dismiss": 1}  # 再プローブしていない
+    assert checks_by_name(r.checks)["overlay_clean"] is False
+    assert checks_by_name(r.checks)["overlay"] is False
+    assert r.overlay_blocked is True
+    assert not learned_file.exists()
+
+
 def test_careful_leftover_never_dismisses(tmp_path, monkeypatch):
     # 欄の残りは「何も触らない」が優先。解消 (クリック等) も試みない
     probe_result = {
@@ -1030,6 +1092,7 @@ def _careful_runner(tmp_path, monkeypatch, probe_result, acfg_extra=None):
     _use_tmp_screenshots(tmp_path, monkeypatch)
     r = gui_flow.Runner(cfg, "discord")
     r.careful_capture = lambda step: (str(tmp_path / "shot.png"), (0, 30, 1440, 870))
+    r.snapshot_thumb = lambda ccfg: None  # 差分判定不能 → 再プローブへ進む
     r.probe = lambda candidates, ccfg: probe_result
 
     def _no_send():
