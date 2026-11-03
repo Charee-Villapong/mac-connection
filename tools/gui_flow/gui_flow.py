@@ -1084,6 +1084,9 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
                 if hit
                 else "宛先 (%s) が画面に見当たらない" % "/".join(aliases)
             ),
+            # 宛先違いの報告用: 想定宛先と、実際にヘッダで読めた文字列
+            "expected": list(aliases),
+            "actual_header": [it["text"] for it in header][:5],
         }
     )
 
@@ -1288,7 +1291,9 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
 
     送信前が「本文の不一致」だけで落ちた場合に限り、欄を全消去して
     再入力する高速リトライを最大 max_retries 回まで行う。それ以外の
-    異常はリトライせず即停止する。送信後検閲 NG は送り直さない。
+    異常はリトライせず即停止する。宛先違いの場合は、自分が入れた文
+    を消して空に戻してから error=wrong_recipient で停止する (送信・
+    再実行はしない)。送信後検閲 NG は送り直さない。
     on_sent は送信キーが成功した直後に 1 回だけ呼ばれる (承認の消費用)。
     承認ゲート自体は呼び出し側 (main) が開始前に済ませる。
 
@@ -1307,6 +1312,11 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
         attempts.append(record)
         info = {"count": retries_done, "attempts": attempts}
         if not retryable:
+            if "recipient" in record["failed_checks"]:
+                # 宛先違い: 送信キーは絶対に押さず、自分が入れた文を
+                # 消して空に戻してから停止する (再実行はしない)
+                r.cleanup_wrong_recipient()
+                return False, "wrong_recipient", info
             return False, "pre_send_failed_stop", info
         if retries_done >= max_retries:
             return False, "pre_send_failed_retry_exhausted", info
@@ -1343,6 +1353,7 @@ class Runner:
         self.last_frame = None
         self.careful_screenshot = None
         self.overlay_blocked = False
+        self.wrong_recipient = None
 
     def _name(self, action):
         self.counter += 1
@@ -1529,6 +1540,44 @@ class Runner:
             }
         )
         return ok
+
+    def cleanup_wrong_recipient(self):
+        """宛先違いの後片付け: 自分が入れた文だけを消して空に戻す。
+
+        検閲で宛先不一致が分かった時点で、その会話の入力欄に入って
+        いるのはこの run が入れた文だけ (input は欄が空でなければ
+        進まないため)。それを消去し、センチネル読み戻しで空を確認
+        する。相手の既存の下書き・履歴には触らない。エイリアスの
+        学習は自動では行わない (本人の承認がある時だけ別途行う)。
+        戻り値: 空に戻せたら True。結果は self.wrong_recipient と
+        checks の wrong_recipient_cleanup に残す。
+        """
+        rec = next(
+            (c for c in reversed(self.checks) if c.get("name") == "recipient"),
+            {},
+        )
+        expected = rec.get("expected") or list(self.acfg.get("recipient_aliases", []))
+        actual = rec.get("actual_header") or []
+        cleaned = self.clear()
+        self.wrong_recipient = {
+            "expected": list(expected),
+            "actual_header": list(actual),
+            "cleaned": cleaned,
+        }
+        self.checks.append(
+            {
+                "name": "wrong_recipient_cleanup",
+                "ok": cleaned,
+                "evidence": "宛先違い (想定: %s / 実際のヘッダ: %s)。"
+                "自分が入れた文を消去し%s"
+                % (
+                    "/".join(expected),
+                    " / ".join(actual) if actual else "不明",
+                    "、空を確認した" if cleaned else "たが空に戻せなかった",
+                ),
+            }
+        )
+        return cleaned
 
     def verify(self, text, mode, fetch_png=False):
         holder = {}
@@ -2173,6 +2222,9 @@ def main():
     if args.action == "careful":
         out["learned"] = learned if learned is not None else []
         out["self_check"] = self_check if self_check is not None else {"ok": False}
+    if getattr(r, "wrong_recipient", None):
+        # 宛先違い: 想定宛先と実際の宛先 (OCR 証拠) を結果に含める
+        out["wrong_recipient"] = r.wrong_recipient
     print(json.dumps(out, ensure_ascii=False, indent=2))
     sys.exit(0 if ok else 2)
 

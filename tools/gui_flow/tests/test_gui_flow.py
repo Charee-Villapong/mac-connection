@@ -164,6 +164,10 @@ def test_verify_recipient_missing_fails():
         "field",
     )
     assert checks_by_name(checks)["recipient"] is False
+    # 宛先違いの報告用に、想定宛先と実際のヘッダ (OCR 証拠) を保持する
+    rec = next(c for c in checks if c["name"] == "recipient")
+    assert rec["expected"] == ["example-dm"]
+    assert "someone-else" in rec["actual_header"]
 
 
 def test_verify_ocr_empty_fails():
@@ -369,6 +373,7 @@ class FakeRunner:
         self.pre_calls = 0
         self.clear_calls = 0
         self.send_calls = 0
+        self.cleanup_calls = 0
         self.verify_fetch_png = None
 
     def pre_send_once(self, text):
@@ -378,6 +383,10 @@ class FakeRunner:
     def clear(self):
         self.clear_calls += 1
         return self.clear_ok
+
+    def cleanup_wrong_recipient(self):
+        self.cleanup_calls += 1
+        return self.clear()
 
     def send(self):
         self.send_calls += 1
@@ -426,16 +435,60 @@ def test_post_retry_exhaustion_stops_without_send(monkeypatch):
     assert fake.send_calls == 0
 
 
-def test_post_recipient_mismatch_never_retries(monkeypatch):
+def test_post_wrong_recipient_cleans_up_and_stops(monkeypatch):
+    # 宛先違いの異常系: 送信されない / 自分が入れた文が消去され空になる /
+    # 再実行されない、を担保する
     monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
     fake = FakeRunner([PRE_STOP])
     ok, error, info = gui_flow.run_post(fake, "text")
     assert ok is False
-    assert error == "pre_send_failed_stop"
-    assert info["count"] == 0
-    assert fake.pre_calls == 1
-    assert fake.clear_calls == 0
-    assert fake.send_calls == 0
+    assert error == "wrong_recipient"
+    assert info["count"] == 0  # リトライしていない
+    assert fake.pre_calls == 1  # 再実行していない
+    assert fake.send_calls == 0  # 送信キーを押していない
+    assert fake.cleanup_calls == 1  # 後片付けが 1 回だけ走った
+    assert fake.clear_calls == 1  # その中で欄が空に戻された
+
+
+def test_cleanup_wrong_recipient_records_and_clears(monkeypatch):
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    r.checks.append(
+        {
+            "name": "recipient",
+            "ok": False,
+            "evidence": "宛先が見当たらない",
+            "expected": ["example-dm"],
+            "actual_header": ["someone-else"],
+        }
+    )
+    canned = {"status": "ok", "field_empty": "yes", "_files": {}, "_ssh_rc": 0}
+    monkeypatch.setattr(r.mac, "run_queue", lambda *a, **k: canned)
+    assert r.cleanup_wrong_recipient() is True
+    assert r.wrong_recipient == {
+        "expected": ["example-dm"],
+        "actual_header": ["someone-else"],
+        "cleaned": True,
+    }
+    assert checks_by_name(r.checks)["field_cleared"] is True
+    assert checks_by_name(r.checks)["wrong_recipient_cleanup"] is True
+
+
+def test_cleanup_wrong_recipient_clear_failure_is_reported(monkeypatch):
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    r.checks.append(
+        {
+            "name": "recipient",
+            "ok": False,
+            "evidence": "宛先が見当たらない",
+            "expected": ["example-dm"],
+            "actual_header": ["someone-else"],
+        }
+    )
+    canned = {"status": "ok", "field_empty": "no", "_files": {}, "_ssh_rc": 0}
+    monkeypatch.setattr(r.mac, "run_queue", lambda *a, **k: canned)
+    assert r.cleanup_wrong_recipient() is False
+    assert r.wrong_recipient["cleaned"] is False
+    assert checks_by_name(r.checks)["wrong_recipient_cleanup"] is False
 
 
 def test_post_calls_on_sent_once_after_send(monkeypatch):
