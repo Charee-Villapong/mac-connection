@@ -2,11 +2,38 @@
   "apps": {
     "discord": {
       "app_name": "Discord",
+      "careful": {
+        "frame_tolerance": 40,
+        "probe_max_candidates": 36,
+        "probe_text": "GF_PROBE_8f3a",
+        "probe_x_ratios": [
+          0.5,
+          0.35,
+          0.65,
+          0.25,
+          0.75
+        ],
+        "probe_y_offsets": [
+          48,
+          30,
+          70,
+          16,
+          95,
+          130
+        ],
+        "self_check_text": ""
+      },
       "field_from_bottom": 90,
       "header_band": 110,
       "input_click": [
         700,
         852
+      ],
+      "learned_frame": [
+        0,
+        30,
+        1440,
+        870
       ],
       "nav_click": [
         174,
@@ -20,11 +47,38 @@
     },
     "line": {
       "app_name": "LINE",
+      "careful": {
+        "frame_tolerance": 40,
+        "probe_max_candidates": 36,
+        "probe_text": "GF_PROBE_8f3a",
+        "probe_x_ratios": [
+          0.5,
+          0.35,
+          0.65,
+          0.25,
+          0.75
+        ],
+        "probe_y_offsets": [
+          120,
+          95,
+          145,
+          70,
+          170,
+          200
+        ],
+        "self_check_text": ""
+      },
       "field_from_bottom": 160,
       "header_band": 110,
       "input_click": [
         800,
         780
+      ],
+      "learned_frame": [
+        0,
+        30,
+        1440,
+        870
       ],
       "nav_click": [
         210,
@@ -43,5 +97,18 @@
     "identity": "/path/to/id_ed25519",
     "proxy_script": "/path/to/ts-proxy.sh",
     "user": "your-ssh-user"
+  },
+  "tunables": {
+    "approval_ttl_hours": 24,
+    "connect_timeout": 60,
+    "leak_threshold": 0.5,
+    "long_line_threshold": 0.75,
+    "max_pre_send_retries": 2,
+    "ocr_threshold": 0.8,
+    "post_send_wait": 1.0,
+    "short_line_max_len": 8,
+    "short_line_threshold": 0.9,
+    "ssh_timeout": 240,
+    "strong_threshold": 0.8
   }
 }

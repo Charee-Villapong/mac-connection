@@ -6,6 +6,9 @@ config.local.*
 secrets/
 # gui_flow approval records (local state, never published)
 tools/gui_flow/approvals/
+# gui_flow careful-mode learning records and config backups (local state)
+tools/gui_flow/learned_cases.jsonl
+config.local.json.bak-*
 *.pem
 *.key
 id_rsa*

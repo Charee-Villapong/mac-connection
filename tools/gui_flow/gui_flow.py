@@ -15,6 +15,7 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
   gui_flow.py discord clear
   gui_flow.py discord post   --text-file msg.txt   # 入力+送信+送信後検閲
   gui_flow.py discord test   --text-file msg.txt   # 入力+検閲+空に戻す (送信なし)
+  gui_flow.py discord careful                      # 慎重モード (学習。送信なし)
   gui_flow.py line    ... 同上
 
 出力: 標準出力に JSON (合否・チェック内訳・各ステップ所要秒数)。
@@ -46,6 +47,18 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
     そのパスを返す (エージェントが探しに行く手順を定型化するため)。
     取得・保存に失敗しても送信結果は成功のままとし、screenshot は null +
     理由を checks に残す。
+  - 慎重モード (careful) は例外処理ではなく「学習の経路」: 高速パスが
+    対応できないケース (レイアウト変化で学習済み座標が合わない等) を
+    段階的に解決し、学んだ座標・フレームを設定へ保存して、次回から
+    そのケースを正常系として処理できるようにする。careful は送信キーを
+    絶対に押さない (自己確認は入力 → 検閲 → 空に戻す、まで)。
+  - 高速パスの停止理由が座標・形状の疑い (検閲の座標系チェックのみが
+    落ちた / ウィンドウフレームが学習値から許容差超でずれた等) の場合は
+    error を needs_calibration とし、careful での再学習を促す。宛先違い・
+    欄の残り・構造エラーは学習対象にせず、従来通り人の慎重プロセス行き。
+  - 調整用の数値はコードに直書きせず config の変数 (tunables / careful)
+    で持つ。新しいケースへの対応は「コード改修」ではなく「変数の変更」
+    で済む構造にする。config に値が無い場合は現行値と同じ既定値で動く。
 
 環境依存値 (接続先・座標・宛先名など) はコードに書かず、
 同ディレクトリの config.local.json (git 管理外) から読む。
@@ -108,6 +121,146 @@ def load_config():
         return json.load(f)
 
 
+def config_path():
+    return os.environ.get("GUI_FLOW_CONFIG") or os.path.join(HERE, "config.local.json")
+
+
+# --- 調整用変数 (tunables) -----------------------------------------------------
+# 調整用の数値はコードに直書きせず、config の "tunables" で上書きできる
+# ようにする (変数を変えるだけで対応できるコーディング)。ここにあるのは
+# 既定値で、現行の挙動と一致する。config.example.json にも同じ値を示す。
+
+DEFAULT_TUNABLES = {
+    "ssh_timeout": 240,  # SSH / キュー 1 回のタイムアウト (秒)
+    "connect_timeout": 60,  # 接続確認のタイムアウト (秒)
+    "post_send_wait": 1.0,  # 送信キーを押してから送信後検閲までの待機 (秒)
+    "max_pre_send_retries": MAX_PRE_SEND_RETRIES,
+    "approval_ttl_hours": 24,  # 承認記録の有効期限 (時間)
+    "ocr_threshold": 0.8,  # 1 行目・アンカーの一致しきい値
+    "strong_threshold": 0.8,  # アンカー候補 (強一致) のしきい値
+    "short_line_threshold": 0.9,  # 短い行の一致しきい値 (1 文字違いが重い)
+    "long_line_threshold": 0.75,  # 通常行の一致しきい値
+    "short_line_max_len": 8,  # 「短い行」とみなす最大文字数 (空白除去後)
+    "leak_threshold": 0.5,  # 送信後検閲で「欄に本文が残っている」とみなす一致度
+}
+
+
+def tunables(cfg):
+    """config の tunables を既定値へ重ねて返す (無いキーは既定値で動く)。"""
+    t = dict(DEFAULT_TUNABLES)
+    t.update((cfg or {}).get("tunables") or {})
+    return t
+
+
+# --- 慎重モード (careful) の設定 ------------------------------------------------
+# ケース依存の値 (探索グリッド・許容差・自己確認文面) はアプリ別の
+# "careful" 設定で持つ。新しいケースへの対応は変数の変更で済ませる。
+
+CAREFUL_BASE_DEFAULTS = {
+    "frame_tolerance": 40,  # フレーム比較の許容差 (px、各辺の差の最大値)
+    "probe_text": "GF_PROBE_8f3a",  # フォーカス判定用のプローブ文字列 (改行なし)
+    "probe_x_ratios": [0.5, 0.35, 0.65, 0.25, 0.75],  # 横位置 (フレーム幅比)
+    "probe_max_candidates": 36,  # 候補点の上限 (既定グリッド総数 31 を覆う)
+    "self_check_text": "",  # 空なら SELF_CHECK_TEXTS の既定値を使う
+}
+
+# アプリ別の既定値 (入力欄の縦位置はアプリで大きく異なるため分ける)
+CAREFUL_APP_DEFAULTS = {
+    "discord": {"probe_y_offsets": [48, 30, 70, 16, 95, 130]},
+    "line": {"probe_y_offsets": [120, 95, 145, 70, 170, 200]},
+}
+
+SELF_CHECK_TEXTS = {
+    "discord": (
+        "```\n"
+        "[SYSTEM] AIエージェントからお知らせ\n"
+        "キャリブレーションの確認です。\n"
+        "送信はしません。\n"
+        "```"
+    ),
+    "line": (
+        "【AIエージェントからのお知らせ】\n"
+        "キャリブレーションの確認です。\n"
+        "送信はしません。"
+    ),
+}
+
+
+def careful_cfg(app, acfg):
+    """アプリ別の careful 設定を既定値へ重ねて返す。"""
+    c = dict(CAREFUL_BASE_DEFAULTS)
+    c.update(CAREFUL_APP_DEFAULTS.get(app, {}))
+    c.update((acfg or {}).get("careful") or {})
+    if not c.get("self_check_text"):
+        c["self_check_text"] = SELF_CHECK_TEXTS[app]
+    return c
+
+
+def probe_candidates(frame, acfg, ccfg):
+    """入力欄の候補点を優先順に生成する (純関数)。
+
+    先頭は学習済みの input_click (フレーム内にある場合)。続いてフレーム
+    下部の帯を、設定した y オフセット (近い順) × x 比率のグリッドで走査する。
+    frame は (x, y, w, h)。
+    """
+    fx, fy, fw, fh = (int(v) for v in frame)
+    bottom = fy + fh
+    pts = []
+    cur = (acfg or {}).get("input_click")
+    if cur and fx <= cur[0] <= fx + fw and fy <= cur[1] <= fy + fh:
+        pts.append((int(cur[0]), int(cur[1])))
+    for yo in ccfg["probe_y_offsets"]:
+        for xr in ccfg["probe_x_ratios"]:
+            p = (int(fx + fw * float(xr)), int(bottom - int(yo)))
+            if p not in pts:
+                pts.append(p)
+    return pts[: int(ccfg["probe_max_candidates"])]
+
+
+def frame_drift(frame_a, frame_b):
+    """2 つのフレーム (x, y, w, h) の各辺の差の最大値。どちらか欠けたら None。"""
+    if not frame_a or not frame_b:
+        return None
+    return max(abs(int(a) - int(b)) for a, b in zip(frame_a, frame_b))
+
+
+# --- 学習の保存 (config 書き込み + 学習記録) --------------------------------------
+# careful が学んだ値は config.local.json (git 管理外) へ保存する。
+# 書き込み前に必ずバックアップを取り、学習記録を JSONL へ 1 行残す。
+
+
+def save_config(cfg, path=None, now=None):
+    """config を保存し、書き込み前に取ったバックアップのパスを返す。"""
+    path = path or config_path()
+    now = now or datetime.now(JST)
+    backup = "%s.bak-%s" % (path, now.strftime("%Y%m%d-%H%M%S"))
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            data = f.read()
+        with open(backup, "wb") as f:
+            f.write(data)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+    return backup
+
+
+def learned_cases_path():
+    return os.environ.get("GUI_FLOW_LEARNED") or os.path.join(
+        HERE, "learned_cases.jsonl"
+    )
+
+
+def append_learned_case(record, path=None):
+    """学習記録を JSONL へ 1 行追記する。"""
+    path = path or learned_cases_path()
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
 # --- 承認記録 (承認ゲート) ---------------------------------------------------
 # 「送信前の本人確認」をエージェント側の注意力ではなくプログラムの構造で
 # 担保する。approve で文面ごとの承認記録を作り、post / send は記録が
@@ -152,10 +305,10 @@ def _write_record(rec):
     os.replace(tmp, path)
 
 
-def create_approval(app, acfg, text, expires=None, now=None):
+def create_approval(app, acfg, text, expires=None, now=None, ttl=None):
     """承認記録を作成 (既存の同文面の記録があれば作り直す) し、記録を返す。"""
     now = now or datetime.now(timezone.utc)
-    exp_dt = _parse_dt(expires) if expires else now + APPROVAL_DEFAULT_TTL
+    exp_dt = _parse_dt(expires) if expires else now + (ttl or APPROVAL_DEFAULT_TTL)
     rec = {
         "app": app,
         "recipient": recipient_key(acfg),
@@ -249,12 +402,31 @@ def save_screenshot_file(app, png_bytes, now=None):
     return path
 
 
+def save_careful_capture(app, step, png_bytes, now=None):
+    """慎重モードのステップ証拠キャプチャを保存し、パスを返す。
+
+    ファイル名は careful-<app>-<YYYYMMDD-HHMMSS>-<step>.png (JST)。
+    """
+    now = now or datetime.now(JST)
+    d = screenshots_dir()
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(
+        d, "careful-%s-%s-%s.png" % (app, now.strftime("%Y%m%d-%H%M%S"), step)
+    )
+    with open(path, "wb") as f:
+        f.write(png_bytes)
+    return path
+
+
 # --- SSH (ControlMaster 多重化) ----------------------------------------------
 
 
 class Mac:
     def __init__(self, cfg):
         s = cfg["ssh"]
+        t = tunables(cfg)
+        self.timeout = int(t["ssh_timeout"])
+        self.connect_timeout = int(t["connect_timeout"])
         self.base = [
             "ssh",
             "-i",
@@ -278,7 +450,9 @@ class Mac:
             "%s@%s" % (s["user"], s["host"]),
         ]
 
-    def run(self, remote_cmd, stdin_text=None, timeout=240):
+    def run(self, remote_cmd, stdin_text=None, timeout=None):
+        if timeout is None:
+            timeout = self.timeout
         data = stdin_text.encode("utf-8") if stdin_text is not None else None
         p = subprocess.run(
             self.base + [remote_cmd],
@@ -290,7 +464,7 @@ class Mac:
         err = p.stderr.decode("utf-8", "replace")
         return p.returncode, out, err
 
-    def run_queue(self, script_body, name, extras=(), timeout=240):
+    def run_queue(self, script_body, name, extras=(), timeout=None):
         """GUI キューへ 1 本投入し、完了を待ち、結果を dict で返す。
 
         投入はアトミックに行う (書き込み途中のスクリプトをキュー係が拾って
@@ -298,6 +472,8 @@ class Mac:
         SSH はこの 1 本だけ。結果ファイル (key=value) に加え、extras で
         指定した付随ファイル (読み戻し・OCR 等) の中身も同じ接続で回収する。
         """
+        if timeout is None:
+            timeout = self.timeout
         remote_parts = [
             "mkdir -p ~/muse-tools/gf-out",
             "cat > ~/muse-tools/gf-out/.in-%s" % name,
@@ -493,6 +669,89 @@ def build_readback_script(name, app, acfg):
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
 
+def build_probe_script(name, app, acfg, candidates, probe_text):
+    """プローブフェーズ (careful 専用): 候補点を順に試して入力欄を探す。
+
+    候補をクリック → プローブ文字列を入力 → センチネル回転で読み戻し、
+    読み戻しがプローブ文字列と一致したら「フォーカスが当たった」と判定
+    する。各候補の試行後、入力した分は必ず全選択 + 削除で消し、最後に
+    欄が空であることをセンチネルで確認する。送信キーは一切送らない
+    (このスクリプトに送信キーの呼び出しは含まれない)。
+    欄に既存の残りがある場合は anomaly_leftover として何も触らず停止する。
+    """
+    flat = " ".join("%d %d" % (int(x), int(y)) for x, y in candidates)
+    parts = [HDR]
+    parts.append(
+        "rm -f ~/muse-tools/gf-out/__NAME__-leftover.txt "
+        "~/muse-tools/gf-out/__NAME__-hit.txt"
+    )
+    parts.append('open -a "%s"' % acfg["app_name"])
+    parts.append("sleep 0.8")
+    if acfg.get("nav_click"):
+        parts.append("$GH click %d %d" % tuple(acfg["nav_click"]))
+        parts.append("sleep 0.5")
+    parts.append("PID=$(pgrep -x %s | head -1)" % acfg["process"])
+    parts.append('say "pid=$PID"')
+    parts.append('if [ -z "$PID" ]; then say "status=app_not_running"; exit 0; fi')
+    # 開始前に欄が空であることを確認 (空でなければ何も触らない)
+    parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
+    parts.append("sleep 0.4")
+    parts.append('SENT="GF_SENT_P_20d9"')
+    parts.append('printf %s "$SENT" | pbcopy')
+    parts.append("$KH keyf 0 cmd pid $PID")
+    parts.append("sleep 0.25")
+    parts.append("$KH keyf 8 cmd pid $PID")
+    parts.append("sleep 0.3")
+    parts.append("PB=$(pbpaste)")
+    parts.append('if [ "$PB" != "$SENT" ]; then')
+    parts.append('  printf %s "$PB" > ~/muse-tools/gf-out/__NAME__-leftover.txt')
+    parts.append('  say "status=anomaly_leftover"')
+    parts.append("  exit 0")
+    parts.append("fi")
+    parts.append('PROBE="%s"' % probe_text)
+    parts.append('CANDS="%s"' % flat)
+    parts.append("set -- $CANDS")
+    parts.append("IDX=0; TRIED=0; HIT=-1; HX=; HY=")
+    parts.append("while [ $# -ge 2 ]; do")
+    parts.append("  CX=$1; CY=$2; shift 2")
+    parts.append("  TRIED=$((TRIED+1))")
+    parts.append("  $GH click $CX $CY")
+    parts.append("  sleep 0.35")
+    parts.append('  $GH type "$PROBE"')
+    parts.append("  sleep 0.25")
+    parts.append('  printf %s "$SENT" | pbcopy')
+    parts.append("  $KH keyf 0 cmd pid $PID")
+    parts.append("  sleep 0.2")
+    parts.append("  $KH keyf 8 cmd pid $PID")
+    parts.append("  sleep 0.25")
+    parts.append("  PB=$(pbpaste)")
+    parts.append("  $KH keyf 0 cmd pid $PID")
+    parts.append("  sleep 0.15")
+    parts.append("  $KH keyf 51 - pid $PID")
+    parts.append("  sleep 0.2")
+    parts.append('  if [ "$PB" = "$PROBE" ]; then HIT=$IDX; HX=$CX; HY=$CY; break; fi')
+    parts.append("  IDX=$((IDX+1))")
+    parts.append("done")
+    parts.append('say "probe_tried=$TRIED"')
+    parts.append('say "probe_hit=$HIT"')
+    parts.append('if [ $HIT -ge 0 ]; then say "probe_point=$HX $HY"; fi')
+    # 終了時にも欄が空であることをセンチネルで確認する
+    parts.append('printf %s "$SENT" | pbcopy')
+    parts.append("$KH keyf 0 cmd pid $PID")
+    parts.append("sleep 0.25")
+    parts.append("$KH keyf 8 cmd pid $PID")
+    parts.append("sleep 0.3")
+    parts.append("PB=$(pbpaste)")
+    parts.append(
+        'if [ "$PB" = "$SENT" ]; then say "field_empty_after=yes"; '
+        'else say "field_empty_after=no"; fi'
+    )
+    parts.append(
+        'if [ $HIT -ge 0 ]; then say "status=ok"; else say "status=probe_no_hit"; fi'
+    )
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
 # ウィンドウ選択 (ScreenCheck list から対象アプリ最大の表示中ウィンドウを 1 つ選ぶ)
 AWK_SELECT = r"""awk -v app="$APP" '
 {
@@ -614,13 +873,15 @@ def best_match(expected, candidates):
     return best, best_r
 
 
-def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode):
+def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
     """verify の必須チェック一式。戻り値は checks のリスト。
 
     本文の照合は「アンカー方式」: 期待文の先頭行に最もよく一致する OCR 行を
     アンカーとし、その周辺の帯を対象領域とする。入力欄は行数に応じて
     上方向に伸びるため、固定オフセットでは領域を決めない。
+    一致しきい値は tunables (tun) から取る (変数化。既定値は現行値)。
     """
+    tun = tun or DEFAULT_TUNABLES
     checks = []
     items = parse_ocr(ocr_text)
     if not items:
@@ -679,13 +940,15 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode):
         return checks
     scored = [(ratio(lines[0], it["text"]), it) for it in items]
     best_r = max(r for r, _ in scored)
-    strong = [it for r, it in scored if r >= 0.8]
+    strong = [it for r, it in scored if r >= tun["strong_threshold"]]
     anchor = (
         max(strong, key=lambda it: it["y"])
         if strong
         else max(scored, key=lambda t: t[0])[1]
     )
-    first_ok = best_r >= 0.8 and norm(lines[0]) == norm(FIRST_LINE[app])
+    first_ok = best_r >= tun["ocr_threshold"] and norm(lines[0]) == norm(
+        FIRST_LINE[app]
+    )
     checks.append(
         {
             "name": "first_line",
@@ -703,7 +966,11 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode):
     for ln in lines:
         c, r = best_match(ln, region)
         # 短い行は 1 文字違いの意味が大きい (例: 不要↔必要) ので厳しめに見る
-        ok = r >= (0.9 if len(norm(ln)) <= 8 else 0.75)
+        ok = r >= (
+            tun["short_line_threshold"]
+            if len(norm(ln)) <= tun["short_line_max_len"]
+            else tun["long_line_threshold"]
+        )
         all_ok = all_ok and ok
         if c is not None:
             idx = region.index(c)
@@ -735,7 +1002,11 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode):
         )
     else:
         below = [it for it in items if it["y"] > bottom + 10 or it["y"] >= height - 110]
-        leak = any(best_match(ln, below)[1] >= 0.5 for ln in lines) if below else False
+        leak = (
+            any(best_match(ln, below)[1] >= tun["leak_threshold"] for ln in lines)
+            if below
+            else False
+        )
         checks.append(
             {
                 "name": "field_state",
@@ -765,6 +1036,81 @@ def classify_pre_send(checks):
     retryable = all(n in RETRYABLE_CHECKS for n in names)
     summary = " / ".join("%s: %s" % (c["name"], c["evidence"]) for c in failed)
     return True, retryable, names, summary[:300]
+
+
+# --- 異常分類: 座標・形状の疑いは needs_calibration --------------------------------
+# 高速パスの停止理由のうち「座標・形状が疑わしいもの」は、人の慎重プロセス
+# ではなく careful (慎重モード) での再学習に回す。学習対象にするのは
+# 座標系のチェックだけで落ちた場合と、フレームのドリフトが大きい場合。
+# 宛先違い・欄の残り・構造エラー・承認・接続は学習対象にしない。
+
+CALIBRATION_ERRORS = {
+    "pre_send_failed_stop",
+    "pre_send_failed_retry_exhausted",
+    "field_readback_failed",
+    None,
+}
+GEOMETRY_CHECKS = {"field_state", "body_match", "readback_match"}
+HARD_BLOCKER_CHECKS = {
+    "connect",
+    "approval",
+    "recipient",
+    "field_empty_before",
+    "structure_codeblock",
+    "ocr_readable",
+    "verify_capture",
+}
+
+
+def classify_needs_calibration(error, checks, acfg, last_frame, tun=None):
+    """停止理由を分類し、座標・形状の疑いなら calibration チェックを返す。
+
+    戻り値: {"name": "calibration", "ok": False, "evidence": ...} または None。
+    呼び出し側は、返り値があれば error を "needs_calibration" に差し替え、
+    このチェックを checks へ追加する。
+    """
+    tun = tun or DEFAULT_TUNABLES
+    if error not in CALIBRATION_ERRORS:
+        return None
+    failed = [c for c in checks if not c["ok"]]
+    if any(c["name"] in HARD_BLOCKER_CHECKS for c in failed):
+        return None
+    reasons = []
+    geo_names = []
+    for c in failed:
+        n = c["name"]
+        if n in GEOMETRY_CHECKS:
+            geo_names.append(n)
+        elif n == "input_status" and "fail_readback_empty" in c["evidence"]:
+            reasons.append("入力しても欄が空のまま (クリック位置が欄を外した疑い)")
+        elif n == "field_readback" and "field_empty" in c["evidence"]:
+            reasons.append("欄の読み戻しが空 (クリック位置が欄を外した疑い)")
+        else:
+            # 座標系以外の失敗 (1 行目・汎用の入力失敗・後片付け失敗等) が
+            # 混ざる場合は学習対象にしない (「座標系チェックのみ」を厳密化)
+            return None
+    if geo_names:
+        reasons.append(
+            "座標系チェックのみ不合格 (%s)" % "/".join(sorted(set(geo_names)))
+        )
+    tol = int(
+        ((acfg or {}).get("careful") or {}).get(
+            "frame_tolerance", CAREFUL_BASE_DEFAULTS["frame_tolerance"]
+        )
+    )
+    drift = frame_drift((acfg or {}).get("learned_frame"), last_frame)
+    if drift is not None and drift > tol:
+        reasons.append(
+            "ウィンドウフレームが学習値から %dpx ずれた (許容差 %dpx)" % (drift, tol)
+        )
+    if not reasons:
+        return None
+    return {
+        "name": "calibration",
+        "ok": False,
+        "evidence": "座標・形状の疑い: %s → careful モードでの再学習を推奨"
+        % "; ".join(reasons),
+    }
 
 
 def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
@@ -803,7 +1149,7 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
         return False, "send_failed", info
     if on_sent is not None:
         on_sent()
-    time.sleep(1.0)
+    time.sleep(getattr(r, "post_send_wait", DEFAULT_TUNABLES["post_send_wait"]))
     if not r.verify(text, "bubble", fetch_png=True):
         return False, "post_send_verify_failed", info
     return True, None, info
@@ -814,13 +1160,18 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
 
 class Runner:
     def __init__(self, cfg, app):
+        self.cfg = cfg
         self.mac = Mac(cfg)
         self.app = app
         self.acfg = cfg["apps"][app]
+        self.tunables = tunables(cfg)
+        self.post_send_wait = float(self.tunables["post_send_wait"])
         self.steps = []
         self.checks = []
         self.counter = 0
         self.last_png_bytes = None
+        self.last_frame = None
+        self.careful_screenshot = None
 
     def _name(self, action):
         self.counter += 1
@@ -839,7 +1190,7 @@ class Runner:
 
     def connect(self):
         def f():
-            rc, out, _ = self.mac.run("echo GF_OK", timeout=60)
+            rc, out, _ = self.mac.run("echo GF_OK", timeout=self.mac.connect_timeout)
             return rc == 0 and "GF_OK" in out
 
         ok = self._timed("connect", f)
@@ -1039,8 +1390,12 @@ class Runner:
                 res.get("_files", {}).get("-png.b64", "")
             )
         win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
+        if len(win) == 5:
+            self.last_frame = win[1:5]
         ocr_text = res.get("_files", {}).get("-ocr.txt", "")
-        vchecks = run_verify_checks(self.app, self.acfg, ocr_text, win, text, mode)
+        vchecks = run_verify_checks(
+            self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
+        )
         self.checks.extend(vchecks)
         return all(c["ok"] for c in vchecks)
 
@@ -1118,6 +1473,253 @@ class Runner:
             return True, False, {"failed_checks": [], "diff_summary": ""}
         return False, retryable, {"failed_checks": names, "diff_summary": summary}
 
+    # --- 慎重モード (careful): 学習の経路 -------------------------------------
+    # 高速パスが対応できないケースを段階的に解決し、学んだ座標・フレームを
+    # config.local.json へ保存して、次回から正常系として処理できるように
+    # する。送信キーは絶対に押さない (自己確認は test と同じ範囲まで)。
+
+    def careful_capture(self, step):
+        """ステップ証拠の撮影。成功したら (保存先パス, フレーム) を返す。
+
+        失敗したら (None, None)。結果は checks の careful_capture に残す。
+        """
+        name = self._name("capture")
+        res = self._timed(
+            "capture",
+            lambda: self.mac.run_queue(
+                build_capture_script(name, self.app, self.acfg),
+                name,
+                extras=("-png.b64",),
+            ),
+        )
+        if res.get("status") != "ok":
+            self.checks.append(
+                {
+                    "name": "careful_capture",
+                    "ok": False,
+                    "evidence": "ステップ '%s' の撮影不可: status=%s"
+                    % (step, res.get("status", "no_result")),
+                }
+            )
+            return None, None
+        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
+        frame = win[1:5] if len(win) == 5 else None
+        if frame:
+            self.last_frame = frame
+        png = decode_b64_bytes(res.get("_files", {}).get("-png.b64", ""))
+        if png is None:
+            self.checks.append(
+                {
+                    "name": "careful_capture",
+                    "ok": False,
+                    "evidence": "ステップ '%s' のキャプチャを取得できなかった" % step,
+                }
+            )
+            return None, frame
+        path = save_careful_capture(self.app, step, png)
+        self.careful_screenshot = path
+        self.checks.append(
+            {
+                "name": "careful_capture",
+                "ok": True,
+                "evidence": "ステップ '%s' の証拠を保存: %s (frame=%s)"
+                % (step, path, frame),
+            }
+        )
+        return path, frame
+
+    def probe(self, candidates, ccfg):
+        """候補点を一括プローブし、フォーカスが当たった点を返す。
+
+        戻り値: dict (status / hit_index / point / tried / field_empty_after)。
+        送信キーは送らない。結果は checks の probe に残す。
+        """
+        name = self._name("probe")
+        res = self._timed(
+            "probe",
+            lambda: self.mac.run_queue(
+                build_probe_script(
+                    name, self.app, self.acfg, candidates, ccfg["probe_text"]
+                ),
+                name,
+                extras=("-leftover.txt",),
+            ),
+        )
+        st = res.get("status", "no_result")
+        out = {
+            "status": st,
+            "hit_index": int(res.get("probe_hit", "-1")),
+            "point": None,
+            "tried": int(res.get("probe_tried", "0")),
+            "field_empty_after": res.get("field_empty_after") == "yes",
+        }
+        if res.get("probe_point"):
+            xy = res["probe_point"].split()
+            if len(xy) == 2:
+                out["point"] = (int(float(xy[0])), int(float(xy[1])))
+        if st == "anomaly_leftover":
+            left = res.get("_files", {}).get("-leftover.txt", "")
+            ev = "欄に残りあり (何も触らず停止): %s" % left.strip()[:80]
+        elif st == "ok" and out["point"] is not None:
+            ev = "候補 %d 点中 %d 点目 %s でフォーカス確認" % (
+                out["tried"],
+                out["hit_index"] + 1,
+                out["point"],
+            )
+        else:
+            ev = "候補 %d 点すべてフォーカスせず (status=%s)" % (out["tried"], st)
+        self.checks.append(
+            {
+                "name": "probe",
+                "ok": st == "ok" and out["point"] is not None,
+                "evidence": ev,
+            }
+        )
+        self.checks.append(
+            {
+                "name": "probe_field_empty",
+                "ok": out["field_empty_after"],
+                "evidence": (
+                    "プローブ後、入力欄は空 (センチネル確認)"
+                    if out["field_empty_after"]
+                    else "プローブ後、入力欄が空に戻っていない"
+                ),
+            }
+        )
+        return out
+
+    def careful(self):
+        """慎重モード本体。戻り値: (ok, learned, self_check_ok)。
+
+        learned は {"item", "old", "new", "reason"} のリスト。学習した値は
+        config.local.json へ保存 (バックアップ + 学習記録の追記) し、
+        仕上げに固定文での自己確認 (入力 → 検閲 → 空に戻す) で正常系へ
+        戻ったことを証明する。
+        """
+        learned = []
+        ccfg = careful_cfg(self.app, self.acfg)
+        tol = int(ccfg["frame_tolerance"])
+        evidence_ok = True  # ステップ証拠が全て保存できたか (合否に連動させる)
+
+        # 1) ウィンドウのフレーム取得 + 学習済みフレームとの比較
+        win_path, frame = self.careful_capture("window")
+        if frame is None:
+            return False, learned, False
+        evidence_ok = evidence_ok and win_path is not None
+        old_frame = self.acfg.get("learned_frame")
+        drift = frame_drift(old_frame, frame)
+        self.checks.append(
+            {
+                "name": "frame_compare",
+                "ok": True,
+                "evidence": (
+                    "学習済みフレームなし (今回を基準として記録)"
+                    if old_frame is None
+                    else "フレーム差 %s (許容差 %dpx): 学習 %s → 現在 %s"
+                    % (drift, tol, old_frame, list(frame))
+                ),
+            }
+        )
+
+        # 2) 入力欄の探索 (現行座標 → グリッド候補の順)
+        candidates = probe_candidates(frame, self.acfg, ccfg)
+        self.checks.append(
+            {
+                "name": "probe_candidates",
+                "ok": True,
+                "evidence": "候補 %d 点を生成 (先頭は学習済み座標)" % len(candidates),
+            }
+        )
+        res = self.probe(candidates, ccfg)
+        if res["status"] != "ok" or res["point"] is None:
+            self.careful_capture("probe-failed")
+            return False, learned, False
+        if not res["field_empty_after"]:
+            return False, learned, False
+        probe_path, _ = self.careful_capture("probe")
+        evidence_ok = evidence_ok and probe_path is not None
+
+        # 3) 学習の保存 (必要な場合のみ)
+        hit = [int(res["point"][0]), int(res["point"][1])]
+        old_click = [int(v) for v in self.acfg.get("input_click", [])]
+        if hit != old_click:
+            learned.append(
+                {
+                    "item": "input_click",
+                    "old": old_click,
+                    "new": hit,
+                    "reason": "プローブでフォーカスが当たった候補 (候補 %d 点目)"
+                    % (res["hit_index"] + 1),
+                }
+            )
+        if old_frame is None or (drift is not None and drift > tol):
+            learned.append(
+                {
+                    "item": "learned_frame",
+                    "old": old_frame,
+                    "new": [int(v) for v in frame],
+                    "reason": (
+                        "基準フレームの新規記録"
+                        if old_frame is None
+                        else "フレーム差 %dpx が許容差 %dpx を超過" % (drift, tol)
+                    ),
+                }
+            )
+        if learned:
+            for entry in learned:
+                self.acfg[entry["item"]] = entry["new"]
+            backup = save_config(self.cfg)
+            now_iso = datetime.now(JST).isoformat()
+            for entry in learned:
+                append_learned_case(
+                    {
+                        "at": now_iso,
+                        "app": self.app,
+                        "item": entry["item"],
+                        "old": entry["old"],
+                        "new": entry["new"],
+                        "reason": entry["reason"],
+                    }
+                )
+            self.checks.append(
+                {
+                    "name": "config_saved",
+                    "ok": True,
+                    "evidence": "学習を config.local.json へ保存 "
+                    "(バックアップ: %s / 学習記録へ追記)" % os.path.basename(backup),
+                }
+            )
+        else:
+            self.checks.append(
+                {
+                    "name": "config_saved",
+                    "ok": True,
+                    "evidence": "現行の座標・フレームで問題なし (学習不要)",
+                }
+            )
+
+        # 4) 自己確認 (送信なし): 固定文で 入力 → 検閲 → 空に戻す
+        text = ccfg["self_check_text"]
+        in_ok = self.input(text)
+        v_ok = self.verify(text, "field") if in_ok else False
+        c_ok = self.clear() if in_ok else False
+        self_check_ok = bool(in_ok and v_ok and c_ok)
+        self.checks.append(
+            {
+                "name": "self_check",
+                "ok": self_check_ok,
+                "evidence": (
+                    "自己確認合格 (入力 → 検閲 → 空に戻す)"
+                    if self_check_ok
+                    else "自己確認 NG (入力 %s / 検閲 %s / 後片付け %s)"
+                    % (in_ok, v_ok, c_ok)
+                ),
+            }
+        )
+        shot_path, _ = self.careful_capture("selfcheck")
+        evidence_ok = evidence_ok and shot_path is not None
+        return self_check_ok and evidence_ok, learned, self_check_ok
+
 
 # --- メイン ---------------------------------------------------------------------
 
@@ -1136,7 +1738,16 @@ def main():
     ap.add_argument("app", choices=["discord", "line"])
     ap.add_argument(
         "action",
-        choices=["approve", "input", "verify", "send", "clear", "post", "test"],
+        choices=[
+            "approve",
+            "input",
+            "verify",
+            "send",
+            "clear",
+            "post",
+            "test",
+            "careful",
+        ],
     )
     ap.add_argument("--text")
     ap.add_argument("--text-file")
@@ -1153,8 +1764,9 @@ def main():
     # approve は Mac に接続しない (承認記録を作るだけ)。
     if args.action == "approve":
         text = read_text(args)
+        ttl = timedelta(hours=float(tunables(cfg)["approval_ttl_hours"]))
         rec = create_approval(
-            args.app, cfg["apps"][args.app], text, expires=args.expires
+            args.app, cfg["apps"][args.app], text, expires=args.expires, ttl=ttl
         )
         out = {
             "ok": True,
@@ -1179,6 +1791,8 @@ def main():
     ok = True
     error = None
     retry_info = None
+    learned = None
+    self_check = None
     try:
         if not r.connect():
             ok = False
@@ -1187,6 +1801,12 @@ def main():
             ok = r.input(read_text(args))
         elif args.action == "verify":
             ok = r.verify(read_text(args), args.mode)
+        elif args.action == "careful":
+            # 慎重モード: 学習の経路。送信キーは絶対に押さない。
+            ok, learned, self_check_ok = r.careful()
+            self_check = {"ok": self_check_ok}
+            if not ok and error is None:
+                error = "careful_failed"
         elif args.action == "send":
             # 承認ゲート: 欄の文面を読み戻し、その文面の承認があるときだけ送る。
             field_text = r.readback_field()
@@ -1213,7 +1833,10 @@ def main():
                 error = "approval_missing"
             else:
                 ok, error, retry_info = run_post(
-                    r, text, on_sent=lambda: r.consume_approval(text)
+                    r,
+                    text,
+                    max_retries=int(r.tunables["max_pre_send_retries"]),
+                    on_sent=lambda: r.consume_approval(text),
                 )
         elif args.action == "test":
             text = read_text(args)
@@ -1228,11 +1851,24 @@ def main():
         ok = False
         error = "%s: %s" % (type(e).__name__, e)
 
+    # 異常分類: 座標・形状の疑いが強い停止は needs_calibration に差し替える
+    # (careful での再学習に回す。宛先違い・残り・構造エラーは従来通り)。
+    if not ok and args.action in ("post", "input", "send"):
+        cal = classify_needs_calibration(
+            error, r.checks, r.acfg, r.last_frame, tun=r.tunables
+        )
+        if cal is not None:
+            error = "needs_calibration"
+            r.checks.append(cal)
+
     # 送信成功時だけ、送信後キャプチャを定位置へ保存してパスを返す。
     # 失敗しても送信結果 (ok) は変えない (screenshot は null + checks に理由)。
     screenshot = None
     if ok and args.action in ("post", "send"):
         screenshot = r.store_post_send_screenshot()
+    elif args.action == "careful":
+        # 慎重モードでは代表キャプチャ (最後のステップ証拠) を返す。
+        screenshot = r.careful_screenshot
 
     out = {
         "ok": ok,
@@ -1245,6 +1881,9 @@ def main():
         "screenshot": screenshot,
         "error": error,
     }
+    if args.action == "careful":
+        out["learned"] = learned if learned is not None else []
+        out["self_check"] = self_check if self_check is not None else {"ok": False}
     print(json.dumps(out, ensure_ascii=False, indent=2))
     sys.exit(0 if ok else 2)
 

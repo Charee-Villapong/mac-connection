@@ -655,3 +655,387 @@ def test_build_verify_and_capture_scripts_png():
     assert "base64 -i" in c
     assert "ocr.swift" not in c  # 撮影だけ (OCR はしない)
     assert "window_not_found" in c
+
+
+# --- 調整用変数 (tunables) ---------------------------------------------------------
+
+
+def test_tunables_defaults_match_current_behavior():
+    t = gui_flow.tunables({})
+    assert t["ssh_timeout"] == 240
+    assert t["connect_timeout"] == 60
+    assert t["post_send_wait"] == 1.0
+    assert t["max_pre_send_retries"] == 2
+    assert t["approval_ttl_hours"] == 24
+    assert t["ocr_threshold"] == 0.8
+    assert t["leak_threshold"] == 0.5
+    assert t["short_line_threshold"] == 0.9
+    assert t["long_line_threshold"] == 0.75
+
+
+def test_tunables_config_override():
+    t = gui_flow.tunables({"tunables": {"ocr_threshold": 0.95, "ssh_timeout": 99}})
+    assert t["ocr_threshold"] == 0.95
+    assert t["ssh_timeout"] == 99
+    assert t["leak_threshold"] == 0.5  # 書いていないキーは既定値のまま
+
+
+def test_mac_timeouts_come_from_tunables():
+    assert gui_flow.Mac(DUMMY_SSH_CFG).timeout == 240
+    cfg = dict(DUMMY_SSH_CFG, tunables={"ssh_timeout": 99, "connect_timeout": 7})
+    mac = gui_flow.Mac(cfg)
+    assert mac.timeout == 99
+    assert mac.connect_timeout == 7
+
+
+def test_verify_thresholds_are_variables():
+    # ocr_threshold を不可能な値にすると、正常な画面でも 1 行目で落ちる
+    tun = dict(gui_flow.DEFAULT_TUNABLES, ocr_threshold=1.1)
+    checks = gui_flow.run_verify_checks(
+        "discord", DISCORD_CFG, discord_ocr(), WIN, DISCORD_TEXT, "field", tun=tun
+    )
+    assert checks_by_name(checks)["first_line"] is False
+    # leak_threshold も変数: 送信後に欄付近へ本文が残っているケース
+    ocr = discord_ocr() + "\n" + ocr_line(454, 800, "これはテストです。")
+    checks = gui_flow.run_verify_checks(
+        "discord", DISCORD_CFG, ocr, WIN, DISCORD_TEXT, "bubble"
+    )
+    assert checks_by_name(checks)["field_state"] is False  # 既定 0.5 では漏れ検出
+    tun2 = dict(gui_flow.DEFAULT_TUNABLES, leak_threshold=1.1)
+    checks = gui_flow.run_verify_checks(
+        "discord", DISCORD_CFG, ocr, WIN, DISCORD_TEXT, "bubble", tun=tun2
+    )
+    assert checks_by_name(checks)["field_state"] is True
+
+
+def test_approval_ttl_override(tmp_path, monkeypatch):
+    _use_tmp_approvals(tmp_path, monkeypatch)
+    from datetime import timedelta
+
+    rec = gui_flow.create_approval(
+        "discord", DISCORD_CFG, DISCORD_TEXT, ttl=timedelta(hours=1)
+    )
+    created = gui_flow._parse_dt(rec["created_at"])
+    expires = gui_flow._parse_dt(rec["expires_at"])
+    assert expires - created == timedelta(hours=1)
+
+
+# --- 慎重モード (careful): 候補生成・フレーム比較 ---------------------------------
+
+
+def test_probe_candidates_learned_first_then_grid():
+    ccfg = gui_flow.careful_cfg("discord", DISCORD_CFG)
+    pts = gui_flow.probe_candidates(WIN[1:], DISCORD_CFG, ccfg)
+    assert pts[0] == (700, 852)  # 学習済み座標が先頭
+    assert pts[1] == (720, 852)  # 次はグリッド (x 比 0.5, 下端 -48)
+    assert len(pts) <= ccfg["probe_max_candidates"]
+    assert len(set(pts)) == len(pts)  # 重複なし
+
+
+def test_probe_candidates_cap_and_outside():
+    ccfg = dict(gui_flow.careful_cfg("discord", DISCORD_CFG), probe_max_candidates=3)
+    pts = gui_flow.probe_candidates(WIN[1:], DISCORD_CFG, ccfg)
+    assert len(pts) == 3
+    # 学習済み座標がフレーム外ならグリッドから始まる
+    moved = dict(DISCORD_CFG, input_click=[5000, 5000])
+    pts = gui_flow.probe_candidates(WIN[1:], moved, ccfg)
+    assert pts[0] == (720, 852)
+
+
+def test_frame_drift():
+    assert gui_flow.frame_drift([0, 30, 1440, 870], [0, 30, 1440, 870]) == 0
+    assert gui_flow.frame_drift([0, 30, 1440, 870], [200, 30, 1440, 870]) == 200
+    assert gui_flow.frame_drift(None, [0, 30, 1440, 870]) is None
+    assert gui_flow.frame_drift([0, 30, 1440, 870], None) is None
+
+
+def test_careful_cfg_defaults_and_override():
+    c = gui_flow.careful_cfg("line", LINE_CFG)
+    assert c["frame_tolerance"] == 40
+    assert c["self_check_text"].startswith("【AIエージェントからのお知らせ】")
+    # 既定グリッドはアプリ別 (LINE の入力欄は Discord より下端から遠い)
+    assert gui_flow.careful_cfg("discord", DISCORD_CFG)["probe_y_offsets"] == [
+        48,
+        30,
+        70,
+        16,
+        95,
+        130,
+    ]
+    assert c["probe_y_offsets"] == [120, 95, 145, 70, 170, 200]
+    # 既定の候補上限は既定グリッド総数 (31) を切り捨てない
+    for app, acfg in (("discord", DISCORD_CFG), ("line", LINE_CFG)):
+        cc = gui_flow.careful_cfg(app, acfg)
+        grid = 1 + len(cc["probe_y_offsets"]) * len(cc["probe_x_ratios"])
+        assert cc["probe_max_candidates"] >= grid
+    custom = dict(
+        LINE_CFG, careful={"probe_y_offsets": [120, 95], "frame_tolerance": 5}
+    )
+    c2 = gui_flow.careful_cfg("line", custom)
+    assert c2["probe_y_offsets"] == [120, 95]
+    assert c2["frame_tolerance"] == 5
+
+
+# --- 慎重モード: プローブスクリプトは送信キーを含まない -------------------------------
+
+
+def test_probe_script_never_sends():
+    ccfg = gui_flow.careful_cfg("discord", DISCORD_CFG)
+    pts = gui_flow.probe_candidates(WIN[1:], DISCORD_CFG, ccfg)
+    for app, acfg in (("discord", DISCORD_CFG), ("line", LINE_CFG)):
+        s = gui_flow.build_probe_script("gf-x.sh", app, acfg, pts, ccfg["probe_text"])
+        assert "keyf 36" not in s  # 送信キー (Return) は一切送らない
+        assert "anomaly_leftover" in s  # 残りありは触らず停止
+        assert "probe_no_hit" in s
+        assert "field_empty_after" in s  # 終了時に空を確認する
+        assert ccfg["probe_text"] in s
+
+
+# --- 学習の保存 -----------------------------------------------------------------
+
+
+def test_save_config_backup_and_content(tmp_path):
+    p = tmp_path / "config.local.json"
+    p.write_text('{"old": true}\n', encoding="utf-8")
+    now = datetime(2026, 11, 4, 8, 0, 0, tzinfo=gui_flow.JST)
+    backup = gui_flow.save_config({"new": 1}, path=str(p), now=now)
+    assert backup.endswith("config.local.json.bak-20261104-080000")
+    with open(backup, encoding="utf-8") as f:
+        assert json.load(f) == {"old": True}
+    with open(p, encoding="utf-8") as f:
+        assert json.load(f) == {"new": 1}
+
+
+def test_append_learned_case_jsonl(tmp_path):
+    p = tmp_path / "learned_cases.jsonl"
+    rec = {
+        "at": "2026-11-04T08:00:00+09:00",
+        "app": "discord",
+        "item": "input_click",
+        "old": [700, 852],
+        "new": [720, 852],
+        "reason": "プローブで一致",
+    }
+    gui_flow.append_learned_case(rec, path=str(p))
+    gui_flow.append_learned_case(rec, path=str(p))
+    lines = p.read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 2
+    assert json.loads(lines[0])["item"] == "input_click"
+
+
+def test_save_careful_capture_name(tmp_path, monkeypatch):
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    now = datetime(2026, 11, 4, 8, 15, 0, tzinfo=gui_flow.JST)
+    path = gui_flow.save_careful_capture("discord", "window", FAKE_PNG, now=now)
+    assert re.fullmatch(r".*/careful-discord-20261104-081500-window\.png", path)
+    with open(path, "rb") as f:
+        assert f.read() == FAKE_PNG
+
+
+# --- 異常分類 (needs_calibration) ---------------------------------------------------
+
+
+def _cal(error, checks, acfg=None, frame=None):
+    return gui_flow.classify_needs_calibration(
+        error, checks, acfg if acfg is not None else DISCORD_CFG, frame
+    )
+
+
+def test_classify_retry_exhausted_geometry_is_calibration():
+    checks = [
+        {"name": "field_state", "ok": False, "evidence": "入力欄の内容が一致しない"},
+        {"name": "body_match", "ok": False, "evidence": "行単位照合 NG"},
+    ]
+    cal = _cal("pre_send_failed_retry_exhausted", checks)
+    assert cal is not None
+    assert cal["name"] == "calibration"
+    assert cal["ok"] is False
+
+
+def test_classify_hard_blockers_are_not_calibration():
+    base = [{"name": "body_match", "ok": False, "evidence": "NG"}]
+    for blocker in ("recipient", "field_empty_before", "structure_codeblock"):
+        checks = base + [{"name": blocker, "ok": False, "evidence": "NG"}]
+        assert _cal("pre_send_failed_stop", checks) is None, blocker
+    # 承認ゲート停止は分類対象外
+    assert _cal("approval_missing", base) is None
+    # 送信後検閲 NG も対象外
+    assert _cal("post_send_verify_failed", base) is None
+
+
+def test_classify_frame_drift_is_calibration():
+    acfg = dict(DISCORD_CFG, learned_frame=[0, 30, 1440, 870])
+    checks = [{"name": "body_match", "ok": False, "evidence": "NG"}]
+    cal = _cal("pre_send_failed_stop", checks, acfg=acfg, frame=(200, 30, 1440, 870))
+    assert cal is not None
+    assert "フレーム" in cal["evidence"]
+    # 許容差内なら座標系チェックの理由が無い限り分類しない
+    checks_ok = [
+        {"name": "input_status", "ok": False, "evidence": "status=queue_timeout"}
+    ]
+    assert _cal(None, checks_ok, acfg=acfg, frame=(10, 30, 1440, 870)) is None
+
+
+def test_classify_readback_empty_is_calibration():
+    checks = [
+        {
+            "name": "input_status",
+            "ok": False,
+            "evidence": "status=fail_readback_empty pid=1234",
+        }
+    ]
+    assert _cal(None, checks) is not None
+    checks2 = [
+        {
+            "name": "field_readback",
+            "ok": False,
+            "evidence": "欄の読み戻し不可: status=field_empty",
+        }
+    ]
+    assert _cal("field_readback_failed", checks2) is not None
+
+
+# --- 慎重モード本体 (モック) ---------------------------------------------------------
+
+
+def _careful_runner(tmp_path, monkeypatch, probe_result, acfg_extra=None):
+    """config を tmp に置き、Mac 接続部を差し替えた Runner を作る。"""
+    acfg = dict(DISCORD_CFG)
+    if acfg_extra:
+        acfg.update(acfg_extra)
+    cfg = {
+        "ssh": DUMMY_SSH_CFG["ssh"],
+        "apps": {"discord": acfg, "line": LINE_CFG},
+    }
+    cfg_file = tmp_path / "config.local.json"
+    cfg_file.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setenv("GUI_FLOW_CONFIG", str(cfg_file))
+    monkeypatch.setenv("GUI_FLOW_LEARNED", str(tmp_path / "learned_cases.jsonl"))
+    _use_tmp_screenshots(tmp_path, monkeypatch)
+    r = gui_flow.Runner(cfg, "discord")
+    r.careful_capture = lambda step: (str(tmp_path / "shot.png"), (0, 30, 1440, 870))
+    r.probe = lambda candidates, ccfg: probe_result
+
+    def _no_send():
+        raise AssertionError("careful は送信キーを押してはいけない")
+
+    r.send = _no_send
+    r.input = lambda text: True
+    r.verify = lambda text, mode, fetch_png=False: True
+    r.clear = lambda: True
+    return r, cfg_file, tmp_path / "learned_cases.jsonl"
+
+
+def test_careful_learns_and_saves(tmp_path, monkeypatch):
+    probe_result = {
+        "status": "ok",
+        "hit_index": 2,
+        "point": (720, 852),
+        "tried": 3,
+        "field_empty_after": True,
+    }
+    r, cfg_file, learned_file = _careful_runner(tmp_path, monkeypatch, probe_result)
+    ok, learned, self_check_ok = r.careful()
+    assert ok is True
+    assert self_check_ok is True
+    items = {e["item"]: e for e in learned}
+    assert items["input_click"]["old"] == [700, 852]
+    assert items["input_click"]["new"] == [720, 852]
+    assert items["learned_frame"]["new"] == [0, 30, 1440, 870]
+    # config ファイルへ保存され、バックアップも取られている
+    saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+    assert saved["apps"]["discord"]["input_click"] == [720, 852]
+    assert saved["apps"]["discord"]["learned_frame"] == [0, 30, 1440, 870]
+    assert list(tmp_path.glob("config.local.json.bak-*"))
+    # 学習記録が項目ごとに追記されている
+    recs = [
+        json.loads(ln)
+        for ln in learned_file.read_text(encoding="utf-8").strip().split("\n")
+    ]
+    assert {rec["item"] for rec in recs} == {"input_click", "learned_frame"}
+    assert checks_by_name(r.checks)["self_check"] is True
+
+
+def test_careful_no_learning_needed(tmp_path, monkeypatch):
+    probe_result = {
+        "status": "ok",
+        "hit_index": 0,
+        "point": (700, 852),
+        "tried": 1,
+        "field_empty_after": True,
+    }
+    r, cfg_file, learned_file = _careful_runner(
+        tmp_path,
+        monkeypatch,
+        probe_result,
+        acfg_extra={"learned_frame": [0, 30, 1440, 870]},
+    )
+    ok, learned, self_check_ok = r.careful()
+    assert ok is True
+    assert learned == []
+    assert not list(tmp_path.glob("config.local.json.bak-*"))  # 保存していない
+    assert not learned_file.exists()
+
+
+def test_classify_mixed_failures_are_not_calibration():
+    # 座標系チェック以外の失敗が混ざると学習対象にしない (厳密化)
+    body = {"name": "body_match", "ok": False, "evidence": "NG"}
+    cases = [
+        [{"name": "first_line", "ok": False, "evidence": "1 行目 NG"}, body],
+        [
+            {
+                "name": "input_status",
+                "ok": False,
+                "evidence": "status=app_not_running pid=?",
+            },
+            body,
+        ],
+        [
+            {"name": "field_cleared", "ok": False, "evidence": "空にできなかった"},
+            {"name": "field_state", "ok": False, "evidence": "一致しない"},
+        ],
+    ]
+    for checks in cases:
+        assert _cal("pre_send_failed_retry_exhausted", checks) is None, checks
+
+
+def test_careful_capture_failure_fails_run(tmp_path, monkeypatch):
+    probe_result = {
+        "status": "ok",
+        "hit_index": 0,
+        "point": (700, 852),
+        "tried": 1,
+        "field_empty_after": True,
+    }
+    r, _, _ = _careful_runner(
+        tmp_path,
+        monkeypatch,
+        probe_result,
+        acfg_extra={"learned_frame": [0, 30, 1440, 870]},
+    )
+
+    def cap(step):
+        if step == "window":
+            return (str(tmp_path / "shot.png"), (0, 30, 1440, 870))
+        return (None, (0, 30, 1440, 870))  # 証拠が保存できない
+
+    r.careful_capture = cap
+    ok, learned, self_check_ok = r.careful()
+    assert self_check_ok is True  # 自己確認自体は合格
+    assert ok is False  # しかし証拠が欠けるので全体は不合格
+
+
+def test_careful_leftover_stops_without_saving(tmp_path, monkeypatch):
+    probe_result = {
+        "status": "anomaly_leftover",
+        "hit_index": -1,
+        "point": None,
+        "tried": 0,
+        "field_empty_after": False,
+    }
+    r, cfg_file, learned_file = _careful_runner(tmp_path, monkeypatch, probe_result)
+    ok, learned, self_check_ok = r.careful()
+    assert ok is False
+    assert learned == []
+    assert self_check_ok is False
+    assert not learned_file.exists()
