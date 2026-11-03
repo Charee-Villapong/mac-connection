@@ -1,0 +1,47 @@
+{
+  "apps": {
+    "discord": {
+      "app_name": "Discord",
+      "field_from_bottom": 90,
+      "header_band": 110,
+      "input_click": [
+        700,
+        852
+      ],
+      "nav_click": [
+        174,
+        350
+      ],
+      "process": "Discord",
+      "recipient_aliases": [
+        "example-dm-name"
+      ],
+      "window_app": "Discord"
+    },
+    "line": {
+      "app_name": "LINE",
+      "field_from_bottom": 160,
+      "header_band": 110,
+      "input_click": [
+        800,
+        780
+      ],
+      "nav_click": [
+        210,
+        160
+      ],
+      "process": "LINE",
+      "recipient_aliases": [
+        "example-talk-name"
+      ],
+      "window_app": "LINE"
+    }
+  },
+  "ssh": {
+    "control_path": "/tmp/gf-ssh-ctl",
+    "host": "100.x.x.x",
+    "identity": "/path/to/id_ed25519",
+    "proxy_script": "/path/to/ts-proxy.sh",
+    "user": "your-ssh-user"
+  }
+}
