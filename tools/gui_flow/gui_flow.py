@@ -29,7 +29,12 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
 安全原則:
   - 異常 (宛先不一致 / 欄に残りあり / ウィンドウなし / 照合不一致など) を
     検知したら送信せずに停止し、結果 JSON で報告する。
-  - post は入力フェーズが全て合格したときだけ送信キーに進む。
+  - post は送信前検閲 (入力 + 欄の OCR 照合) が全て合格したときだけ
+    送信キーに進む。
+  - 送信前検閲が「本文の不一致」だけで落ちた場合に限り、post は欄を
+    全消去して再入力する高速リトライを最大 2 回まで自動で行う。
+    宛先不一致・欄の残り・画面が読めない等の異常はリトライせず即停止する。
+  - 送信後検閲 NG は自動で送り直さず、報告のみとする。
 
 環境依存値 (接続先・座標・宛先名など) はコードに書かず、
 同ディレクトリの config.local.json (git 管理外) から読む。
@@ -65,6 +70,11 @@ SEND_KEY = {
 }
 # Discord の改行キー (Shift+Enter)。LINE は貼り付けで改行ごと入れる。
 NEWLINE_KEY = "36 shift"
+# post の送信前検閲リトライ上限 (本人の承認仕様: 最大 2 回)
+MAX_PRE_SEND_RETRIES = 2
+# 送信前検閲で「本文の不一致」とみなし、高速リトライを許可するチェック名。
+# これ以外のチェック (宛先・構造・撮影可否など) が 1 つでも落ちたら即停止する。
+RETRYABLE_CHECKS = {"readback_match", "body_match", "field_state", "first_line"}
 
 
 # --- 設定 -------------------------------------------------------------------
@@ -515,6 +525,61 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode):
     return checks
 
 
+def classify_pre_send(checks):
+    """送信前チェック群を分類する。
+
+    戻り値: (failed, retryable, failed_names, diff_summary)
+    retryable は「落ちたチェックが全て本文の不一致系 (RETRYABLE_CHECKS)
+    のとき」だけ True。宛先不一致・残りあり・画面が読めない等が混ざれば
+    False (即停止)。
+    """
+    failed = [c for c in checks if not c["ok"]]
+    if not failed:
+        return False, False, [], ""
+    names = [c["name"] for c in failed]
+    retryable = all(n in RETRYABLE_CHECKS for n in names)
+    summary = " / ".join("%s: %s" % (c["name"], c["evidence"]) for c in failed)
+    return True, retryable, names, summary[:300]
+
+
+def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES):
+    """post フロー: 送信前 (入力 + 欄検閲) → 送信 → 送信後検閲。
+
+    送信前が「本文の不一致」だけで落ちた場合に限り、欄を全消去して
+    再入力する高速リトライを最大 max_retries 回まで行う。それ以外の
+    異常はリトライせず即停止する。送信後検閲 NG は送り直さない。
+
+    戻り値: (ok, error, retry_info)
+    retry_info = {"count": リトライ実施回数,
+                  "attempts": [各失敗回の failed_checks と差分要約]}
+    """
+    attempts = []
+    retries_done = 0
+    while True:
+        ok_pre, retryable, record = r.pre_send_once(text)
+        if ok_pre:
+            break
+        record = dict(record)
+        record["attempt"] = len(attempts) + 1
+        attempts.append(record)
+        info = {"count": retries_done, "attempts": attempts}
+        if not retryable:
+            return False, "pre_send_failed_stop", info
+        if retries_done >= max_retries:
+            return False, "pre_send_failed_retry_exhausted", info
+        # 消すのはこの run で自分が入力した分だけ (pre_send_once が通した範囲)
+        if not r.clear():
+            return False, "retry_clear_failed", info
+        retries_done += 1
+    info = {"count": retries_done, "attempts": attempts}
+    if not r.send():
+        return False, "send_failed", info
+    time.sleep(1.0)
+    if not r.verify(text, "bubble"):
+        return False, "post_send_verify_failed", info
+    return True, None, info
+
+
 # --- フェーズ実行 ---------------------------------------------------------------
 
 
@@ -681,6 +746,20 @@ class Runner:
         self.checks.extend(vchecks)
         return all(c["ok"] for c in vchecks)
 
+    def pre_send_once(self, text):
+        """送信前の一巡: 入力 → 欄モード検閲。
+
+        戻り値: (ok, retryable, record)
+        record は {"failed_checks": [...], "diff_summary": "..."} で、
+        失敗時にどのチェックがどう違ったかを保持する (成功時は空)。
+        """
+        start = len(self.checks)
+        passed = self.input(text) and self.verify(text, "field")
+        _, retryable, names, summary = classify_pre_send(self.checks[start:])
+        if passed:
+            return True, False, {"failed_checks": [], "diff_summary": ""}
+        return False, retryable, {"failed_checks": names, "diff_summary": summary}
+
 
 # --- メイン ---------------------------------------------------------------------
 
@@ -710,6 +789,7 @@ def main():
     t0 = time.time()
     ok = True
     error = None
+    retry_info = None
     try:
         if not r.connect():
             ok = False
@@ -724,15 +804,7 @@ def main():
             ok = r.clear()
         elif args.action == "post":
             text = read_text(args)
-            if r.input(text):
-                if r.send():
-                    time.sleep(1.0)
-                    ok = r.verify(text, "bubble")
-                else:
-                    ok = False
-            else:
-                ok = False
-                error = "input_failed_send_aborted"  # 異常時は送信しない
+            ok, error, retry_info = run_post(r, text)
         elif args.action == "test":
             text = read_text(args)
             in_ok = r.input(text)
@@ -753,6 +825,7 @@ def main():
         "total_sec": round(time.time() - t0, 2),
         "steps": r.steps,
         "checks": r.checks,
+        "retry": retry_info,
         "error": error,
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))

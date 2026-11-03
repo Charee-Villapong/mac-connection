@@ -284,3 +284,150 @@ def test_run_queue_parses_result_and_files(monkeypatch):
     assert res["status"] == "ok"
     assert res["pid"] == "1234"
     assert res["_files"]["-readback.txt"].strip() == "line1\nline2"
+
+
+# --- 送信前リトライの分類 ---------------------------------------------------------
+
+
+def test_classify_pre_send_body_only_is_retryable():
+    checks = [
+        {"name": "recipient", "ok": True, "evidence": "宛先を確認"},
+        {"name": "body_match", "ok": False, "evidence": "行単位照合: x (0.40)"},
+        {"name": "field_state", "ok": False, "evidence": "期待文と一致しない"},
+    ]
+    failed, retryable, names, summary = gui_flow.classify_pre_send(checks)
+    assert failed is True
+    assert retryable is True
+    assert names == ["body_match", "field_state"]
+    assert "body_match" in summary
+
+
+def test_classify_pre_send_recipient_is_not_retryable():
+    checks = [
+        {"name": "recipient", "ok": False, "evidence": "宛先が見当たらない"},
+        {"name": "body_match", "ok": False, "evidence": "行単位照合: x (0.40)"},
+    ]
+    failed, retryable, names, _ = gui_flow.classify_pre_send(checks)
+    assert failed is True
+    assert retryable is False
+    assert names == ["recipient", "body_match"]
+
+
+def test_classify_pre_send_all_ok():
+    checks = [{"name": "body_match", "ok": True, "evidence": "一致"}]
+    failed, retryable, names, summary = gui_flow.classify_pre_send(checks)
+    assert failed is False
+    assert retryable is False
+    assert names == []
+    assert summary == ""
+
+
+def test_pre_send_once_readback_mismatch_is_retryable(monkeypatch):
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    canned = {
+        "status": "ok",
+        "pid": "1234",
+        "_files": {"-readback.txt": "違う文面です", "-leftover.txt": ""},
+        "_ssh_rc": 0,
+    }
+    monkeypatch.setattr(r.mac, "run_queue", lambda *a, **k: canned)
+    ok, retryable, record = r.pre_send_once(DISCORD_TEXT)
+    assert ok is False
+    assert retryable is True
+    assert record["failed_checks"] == ["readback_match"]
+
+
+def test_pre_send_once_leftover_is_not_retryable(monkeypatch):
+    r = gui_flow.Runner(DUMMY_SSH_CFG, "discord")
+    canned = {
+        "status": "anomaly_leftover",
+        "pid": "1234",
+        "_files": {"-leftover.txt": "他人の下書き", "-readback.txt": ""},
+        "_ssh_rc": 0,
+    }
+    monkeypatch.setattr(r.mac, "run_queue", lambda *a, **k: canned)
+    ok, retryable, record = r.pre_send_once(DISCORD_TEXT)
+    assert ok is False
+    assert retryable is False
+    assert "field_empty_before" in record["failed_checks"]
+
+
+# --- post の高速リトライ ------------------------------------------------------------
+
+
+class FakeRunner:
+    """run_post 用の疑似 Runner。pre_send_once の結果列をスクリプトする。"""
+
+    def __init__(self, pre_results, send_ok=True, bubble_ok=True, clear_ok=True):
+        self.pre_results = list(pre_results)
+        self.send_ok = send_ok
+        self.bubble_ok = bubble_ok
+        self.clear_ok = clear_ok
+        self.pre_calls = 0
+        self.clear_calls = 0
+        self.send_calls = 0
+
+    def pre_send_once(self, text):
+        self.pre_calls += 1
+        return self.pre_results.pop(0)
+
+    def clear(self):
+        self.clear_calls += 1
+        return self.clear_ok
+
+    def send(self):
+        self.send_calls += 1
+        return self.send_ok
+
+    def verify(self, text, mode):
+        assert mode == "bubble"
+        return self.bubble_ok
+
+
+PRE_PASS = (True, False, {"failed_checks": [], "diff_summary": ""})
+PRE_MISMATCH = (
+    False,
+    True,
+    {"failed_checks": ["body_match"], "diff_summary": "body_match: 行単位照合 NG"},
+)
+PRE_STOP = (
+    False,
+    False,
+    {"failed_checks": ["recipient"], "diff_summary": "recipient: 宛先が見当たらない"},
+)
+
+
+def test_post_retries_on_body_mismatch_then_sends(monkeypatch):
+    monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
+    fake = FakeRunner([PRE_MISMATCH, PRE_PASS])
+    ok, error, info = gui_flow.run_post(fake, "text")
+    assert ok is True
+    assert error is None
+    assert info["count"] == 1
+    assert info["attempts"][0]["failed_checks"] == ["body_match"]
+    assert fake.clear_calls == 1
+    assert fake.send_calls == 1
+
+
+def test_post_retry_exhaustion_stops_without_send(monkeypatch):
+    monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
+    fake = FakeRunner([PRE_MISMATCH, PRE_MISMATCH, PRE_MISMATCH])
+    ok, error, info = gui_flow.run_post(fake, "text")
+    assert ok is False
+    assert error == "pre_send_failed_retry_exhausted"
+    assert info["count"] == 2
+    assert len(info["attempts"]) == 3
+    assert fake.clear_calls == 2
+    assert fake.send_calls == 0
+
+
+def test_post_recipient_mismatch_never_retries(monkeypatch):
+    monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
+    fake = FakeRunner([PRE_STOP])
+    ok, error, info = gui_flow.run_post(fake, "text")
+    assert ok is False
+    assert error == "pre_send_failed_stop"
+    assert info["count"] == 0
+    assert fake.pre_calls == 1
+    assert fake.clear_calls == 0
+    assert fake.send_calls == 0
