@@ -31,6 +31,7 @@
       "default_recipient": "example-dm-name",
       "field_from_bottom": 90,
       "header_band": 110,
+      "header_candidate_expansion": true,
       "input_click": [
         700,
         852
@@ -53,7 +54,7 @@
           ]
         }
       },
-      "talk_list_width_ratio": 0.32,
+      "talk_list_width_ratio": 0.27,
       "window_app": "Discord"
     },
     "line": {
