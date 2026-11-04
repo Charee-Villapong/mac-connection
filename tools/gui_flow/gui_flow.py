@@ -2089,11 +2089,14 @@ class Runner:
         宛先 (recipient) チェックは check_recipient_header と同じ
         共有ドライバ (_judge_header_multi) で判定する: 最大
         header_check_attempts 回まで撮り直し、各回を MATCH / OTHER /
-        UNREADABLE に分類する (分類は run_verify_checks の recipient
-        チェックが返した actual_header に対して行い、領域スコープ等の
-        規則は単回チェックと同一に保つ)。OTHER が出たら残りの撮影を
-        せず打ち切る。recipient 以外のチェック (本文・構造等) は、
-        最後に撮影できた回の run_verify_checks 結果を使う。最終的な
+        UNREADABLE に分類する (分類は、同じ回のレスポンスに含まれる
+        ヘッダ帯切り出し OCR (-header-ocr.txt) から作った run 群に
+        対して行う。全体 OCR は宛先判定に使わない)。OTHER が出たら
+        残りの撮影をせず打ち切る。recipient 以外のチェック
+        (本文・構造等) は、最後に撮影できた回の全体 OCR に対する
+        run_verify_checks 結果を使う (run_verify_checks 自体は
+        変更せず、その recipient チェックは集約チェックで置き換える)。
+        最終的な
         recipient チェックは 1 件に集約して checks へ積み、各回の
         ヘッダ文字列と分類を evidence と attempts に残す。
         判定結果は self.recipient_header_error にも残す
@@ -2116,11 +2119,11 @@ class Runner:
 
             def f():
                 name = self._name("verify")
-                extras = ["-ocr.txt"]
+                extras = ["-ocr.txt", "-header-ocr.txt"]
                 if fetch_png:
                     extras.append("-png.b64")
                 holder["res"] = self.mac.run_queue(
-                    build_verify_script(name, self.app, self.acfg),
+                    build_verify_script(name, self.app, self.acfg, tun=self.tunables),
                     name,
                     extras=tuple(extras),
                 )
@@ -2150,10 +2153,12 @@ class Runner:
                 self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
             )
             state["last_vchecks"] = vchecks
-            rec = next((c for c in vchecks if c.get("name") == "recipient"), None)
-            actual_header = list(rec.get("actual_header") or []) if rec else []
+            header_runs = self._text_runs(
+                parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
+            )
+            actual_header = [text for _point, text in header_runs]
             att = classify_header_attempt(
-                [(None, t) for t in actual_header],
+                header_runs,
                 aliases,
                 other_names,
                 prefix_max_extra=max_extra,
@@ -2528,7 +2533,7 @@ class Runner:
         res = self._timed(
             "capture",
             lambda: self.mac.run_queue(
-                build_verify_script(name, self.app, self.acfg),
+                build_verify_script(name, self.app, self.acfg, tun=self.tunables),
                 name,
                 extras=("-ocr.txt",),
             ),
@@ -2540,6 +2545,35 @@ class Runner:
         if frame:
             self.last_frame = frame
         return frame, parse_ocr(res.get("_files", {}).get("-ocr.txt", ""))
+
+    def capture_header_runs(self):
+        """対象ウィンドウを撮影し、(フレーム, ヘッダ切り出し run 群) を返す。
+
+        build_verify_script が作るヘッダ帯切り出し OCR
+        (-header-ocr.txt) だけを取得し、その項目を text_runs
+        (merge 間隔は tunables の talk_row_merge_px) で run 化する。
+        全体 OCR (-ocr.txt) は取得も判定もしない。撮影ができなければ
+        (None, [])、切り出しファイルが無い・空なら (フレーム, [])。
+        checks には積まない (capture_ocr と同じ作法)。last_frame の
+        更新も capture_ocr と同様に行う。
+        """
+        name = self._name("verify")
+        res = self._timed(
+            "capture",
+            lambda: self.mac.run_queue(
+                build_verify_script(name, self.app, self.acfg, tun=self.tunables),
+                name,
+                extras=("-header-ocr.txt",),
+            ),
+        )
+        if res.get("status") != "ok":
+            return None, []
+        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
+        frame = win[1:5] if len(win) == 5 else None
+        if frame:
+            self.last_frame = frame
+        items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
+        return frame, text_runs(items, float(self.tunables["talk_row_merge_px"]))
 
     def click_point(self, point):
         """指定点を 1 回クリックする (前面化つき)。送信キーは送らない。"""
@@ -2775,10 +2809,10 @@ class Runner:
         """入力前に、開いたトークのヘッダだけで宛先を確認する。
 
         nav_click があればその行をクリックして開いてから、複数回
-        判定 (共有ドライバ _judge_header_multi) でヘッダ領域
-        (一覧より右・y 上限未満) の run だけを宛先エイリアスと照合
-        する (run_verify_checks の recipient チェックと同じ共有
-        ヘルパー・同じ共有キーを使う)。トーク一覧に写った名前では
+        判定 (共有ドライバ _judge_header_multi) で、各回の撮影ごとに
+        capture_header_runs() が返すヘッダ帯切り出し OCR の run 群
+        だけを宛先エイリアスと照合する (全体 OCR からヘッダ領域を
+        座標で拾う方式は使わない)。トーク一覧に写った名前では
         合格しない。各回の分類は MATCH / OTHER / UNREADABLE の 3 値で、
         evidence と構造化フィールド (attempts) に各回のヘッダ文字列と
         分類を残す。
@@ -2806,11 +2840,6 @@ class Runner:
                     }
                 )
                 return False
-        max_y = float(
-            self.tunables.get(
-                "relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"]
-            )
-        )
         max_extra = int(
             self.tunables.get(
                 "relearn_header_prefix_max_extra",
@@ -2820,8 +2849,8 @@ class Runner:
         other_names = self.other_recipient_formal_names()
 
         def attempt_fn():
-            frame, items = self.capture_ocr()
-            if frame is None or not items:
+            frame, runs = self.capture_header_runs()
+            if frame is None or not runs:
                 return {
                     "classification": "UNREADABLE",
                     "kind": None,
@@ -2830,13 +2859,6 @@ class Runner:
                     "matched": None,
                     "header": [],
                 }
-            runs = header_region_runs(
-                items,
-                frame[2],
-                self.talk_list_width_ratio(),
-                max_y,
-                float(self.tunables["talk_row_merge_px"]),
-            )
             att = classify_header_attempt(
                 runs, aliases, other_names, prefix_max_extra=max_extra
             )
