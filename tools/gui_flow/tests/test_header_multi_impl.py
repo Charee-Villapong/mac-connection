@@ -108,7 +108,17 @@ def make_header_runner(monkeypatch, header_sequence, tunables=None, sleeps=None)
         items = gui_flow.parse_ocr(header_ocr_line(header))
         return (FRAME, items)
 
+    def fake_capture_header_runs():
+        # フェーズ4 是正: check_recipient_header は capture_header_runs
+        # (切り出し OCR) 経由になったため、同じ撮影列の run 群を返す。
+        state["count"] += 1
+        header = seq.pop(0) if seq else GARBLED
+        items = gui_flow.parse_ocr(header_ocr_line(header))
+        runs = gui_flow.text_runs(items, float(runner.tunables["talk_row_merge_px"]))
+        return (FRAME, runs)
+
     runner.capture_ocr = fake_capture_ocr
+    runner.capture_header_runs = fake_capture_header_runs
     runner.click_point = lambda point: True
     return runner, state
 
@@ -228,7 +238,13 @@ def make_verify_runner(monkeypatch, header_sequence):
             "status": "ok",
             "pid": "1234",
             "window": "767 0 30 1440 870",
-            "_files": {"-ocr.txt": discord_ocr(header), "-png.b64": ""},
+            "_files": {
+                "-ocr.txt": discord_ocr(header),
+                # フェーズ4 是正: 切り出し OCR (-header-ocr.txt) を
+                # 同じ回のヘッダ文字列で同梱する。
+                "-header-ocr.txt": header_ocr_line(header),
+                "-png.b64": "",
+            },
             "_ssh_rc": 0,
         }
 
@@ -275,6 +291,8 @@ def _pre_send_runner(monkeypatch, header):
         files = {"-readback.txt": DISCORD_TEXT, "-leftover.txt": ""}
         if "ocr.swift" in script:
             files["-ocr.txt"] = discord_ocr(header)
+            # フェーズ4 是正: 切り出し OCR も同じヘッダ文字列で返す。
+            files["-header-ocr.txt"] = header_ocr_line(header)
         return {
             "status": "ok",
             "pid": "1234",

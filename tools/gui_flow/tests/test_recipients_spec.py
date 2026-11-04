@@ -135,6 +135,12 @@ def pre_send_with_mocked_mac(runner, text, ocr_text):
                 "-readback.txt": text,
                 "-leftover.txt": "",
                 "-ocr.txt": ocr_text,
+                # フェーズ4 是正: 新しい撮影スクリプトは切り出し OCR
+                # (-header-ocr.txt) も返す。ocr_text の先頭行は
+                # ヘッダ文字列なので、それを切り出し結果として返す
+                # (check_recipient_header の capture_header_runs 経由
+                # でも同じヘッダが読めるようにする)。
+                "-header-ocr.txt": ocr_text.splitlines()[0] if ocr_text else "",
             },
             "_ssh_rc": 0,
         }

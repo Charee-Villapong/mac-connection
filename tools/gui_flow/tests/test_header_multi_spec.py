@@ -179,7 +179,18 @@ def make_header_runner(monkeypatch, header_sequence):
         items = gui_flow.parse_ocr(header_ocr_line(header))
         return (FRAME, items)
 
+    def fake_capture_header_runs():
+        # フェーズ4 是正: check_recipient_header の撮影は
+        # capture_header_runs (切り出し OCR) 経由になったため、同じ
+        # 撮影列を切り出し側の run 群として返すフェイクも付ける。
+        state["count"] += 1
+        header = seq.pop(0) if seq else GARBLED_1
+        items = gui_flow.parse_ocr(header_ocr_line(header))
+        runs = gui_flow.text_runs(items, float(runner.tunables["talk_row_merge_px"]))
+        return (FRAME, runs)
+
     runner.capture_ocr = fake_capture_ocr
+    runner.capture_header_runs = fake_capture_header_runs
     runner.click_point = lambda point: state["clicks"].append(point) or True
     return runner, state
 
@@ -508,7 +519,14 @@ def make_verify_runner(monkeypatch, header_sequence):
             "status": "ok",
             "pid": "1234",
             "window": "767 0 30 1440 870",
-            "_files": {"-ocr.txt": discord_ocr(header), "-png.b64": ""},
+            "_files": {
+                "-ocr.txt": discord_ocr(header),
+                # フェーズ4 是正: 新しい撮影スクリプトは切り出し OCR
+                # (-header-ocr.txt) も返すため、フェイクにも同じ回の
+                # ヘッダ文字列で同梱する。
+                "-header-ocr.txt": header_ocr_line(header),
+                "-png.b64": "",
+            },
             "_ssh_rc": 0,
         }
 

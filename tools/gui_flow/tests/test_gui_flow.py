@@ -635,6 +635,10 @@ def test_verify_fetch_png_sets_last_png_bytes(monkeypatch):
         "window": "767 0 30 1440 870",
         "_files": {
             "-ocr.txt": discord_ocr(),
+            # フェーズ4 是正: 新しい撮影スクリプトは切り出し OCR
+            # (-header-ocr.txt) も返すため、フェイクにも宛先名
+            # (example-dm) を含む切り出し結果を同梱する。
+            "-header-ocr.txt": ocr_line(421, 50, "example-dm"),
             "-png.b64": base64.b64encode(FAKE_PNG).decode("ascii"),
         },
         "_ssh_rc": 0,

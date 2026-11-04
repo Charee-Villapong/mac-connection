@@ -69,6 +69,22 @@ def make_runner(items, click_ok=True, nav_click=True):
     clicks = []
     r.click_point = lambda point: clicks.append(point) or click_ok
     r.capture_ocr = lambda: (FRAME, list(items))
+
+    def fake_capture_header_runs():
+        # フェーズ4 是正: check_recipient_header は capture_header_runs
+        # (切り出し OCR) 経由になった。切り出し画像にはヘッダ帯だけが
+        # 写るため、従来フィクスチャの項目からヘッダ領域の run 群
+        # (従来と同じ読み) を作って返す。
+        runs = gui_flow.header_region_runs(
+            list(items),
+            FRAME[2],
+            r.talk_list_width_ratio(),
+            float(r.tunables["relearn_header_max_y"]),
+            float(r.tunables["talk_row_merge_px"]),
+        )
+        return (FRAME, runs)
+
+    r.capture_header_runs = fake_capture_header_runs
     r._test_clicks = clicks
     return r
 
@@ -112,6 +128,8 @@ def test_check_header_list_name_only_fails_as_unreadable():
 def test_check_header_unreadable_when_capture_fails():
     r = make_runner([])
     r.capture_ocr = lambda: (None, [])
+    # フェーズ4 是正: 撮影経路は capture_header_runs に移った
+    r.capture_header_runs = lambda: (None, [])
     assert r.check_recipient_header() is False
     assert header_check(r)["ok"] is False
     assert r.recipient_header_error == "recipient_header_unreadable"
@@ -125,6 +143,8 @@ def test_check_header_click_failure_skips_capture():
         raise AssertionError("クリック失敗時は撮影してはいけない")
 
     r.capture_ocr = boom
+    # フェーズ4 是正: 撮影経路は capture_header_runs に移った
+    r.capture_header_runs = boom
     assert r.check_recipient_header() is False
     assert header_check(r)["ok"] is False
     assert r.recipient_header_error == "recipient_header_unreadable"
