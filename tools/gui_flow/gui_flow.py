@@ -153,6 +153,10 @@ DEFAULT_TUNABLES = {
     "leak_threshold": 0.5,  # 送信後検閲で「欄に本文が残っている」とみなす一致度
     "talk_list_width_ratio": 0.32,  # 再学習でトーク一覧とみなす横範囲 (窓幅比)。apps.<app> の同名キーでアプリ別に上書き可
     "relearn_header_max_y": 260,  # 再学習で「ヘッダ」とみなす縦範囲 (窓相対 px)
+    "relearn_header_prefix_max_extra": 2,  # 再学習のヘッダ確認で前方一致を
+    # 許す余りの最大文字数。ヘッダ名の右のアイコンが OCR で名前の後ろに
+    # 連結される誤読 (例「<名前>4呼」) を吸収するための緩和で、完全一致
+    # しない場合に限り「指定名で始まり余りがこの文字数以内」を一致とする
     "talk_row_merge_px": 12,  # 再学習の行判定: 同じ行とみなす縦間隔と、横に連続
     # した文字列とみなす横間隔 (px)
 }
@@ -2272,8 +2276,12 @@ class Runner:
         # ヘッダ確認は、開いたトーク側の領域 (トーク一覧より右) に
         # 限定する。一覧は開いた後も左に残るため、帯の縦範囲だけで
         # 見ると一覧側の名前で合格してしまう。判定は行の中の連続した
-        # 文字列単位で、照合は宛先チェック関数 header_name_match に
-        # 寄せる (アプリ非依存。ここでは完全一致のみを使う)。
+        # 文字列単位で行う。一致条件は完全一致、または「指定名で始まり
+        # 余りが relearn_header_prefix_max_extra 文字以内」の前方一致。
+        # ヘッダ名の右にあるアイコンが OCR で名前の後ろに連結される
+        # 誤読 (例「<名前>4呼」) を吸収するための緩和で、領域スコープと
+        # 一覧側の完全一致 (クリック前に確定) が安全側の担保になる。
+        # この判定はアプリ共通経路であり、LINE / Discord の両方に効く。
         fw2 = (_frame2 or frame)[2]
         header_min_cx = fw2 * self.talk_list_width_ratio()
         header_items = [
@@ -2283,34 +2291,57 @@ class Runner:
             and it["x"] + it["w"] / 2 > header_min_cx
             and norm(it["text"])
         ]
+        max_extra = int(self.tunables["relearn_header_prefix_max_extra"])
         header_hit = None
+        header_match = None  # "exact" | "prefix"
+        header_extra = 0
+        prefix_hit = None
         for _point, text in self._text_runs(header_items):
-            kind, _extra = header_name_match(text, target)
+            kind, extra = header_name_match(text, target, prefix_max_extra=max_extra)
             if kind == "exact":
-                header_hit = norm(text)
+                header_hit, header_match, header_extra = norm(text), "exact", 0
                 break
+            if kind == "prefix" and prefix_hit is None:
+                prefix_hit = (norm(text), extra)
+        if header_hit is None and prefix_hit is not None:
+            header_hit, header_extra = prefix_hit
+            header_match = "prefix"
         if header_hit is None:
             self.checks.append(
                 {
                     "name": "recipient_header",
                     "ok": False,
                     "evidence": "開いた先のヘッダに '%s' が見当たらない"
-                    " (何も登録せず停止)" % name,
+                    " (完全一致・前方一致 (余り%d文字以内) のいずれでも"
+                    "一致せず、何も登録せず停止)" % (name, max_extra),
                 }
             )
             self.careful_capture("recipient-header-mismatch")
             self.relearn_error = "recipient_header_mismatch"
             return False, []
+        if header_match == "exact":
+            header_evidence = (
+                "開いた先のヘッダで宛名 '%s' を確認 (一致方式: exact)" % header_hit
+            )
+        else:
+            header_evidence = (
+                "開いた先のヘッダで宛名 '%s' を確認"
+                " (一致方式: prefix、ヘッダ文字列 '%s'、余り%d文字)"
+                % (name, header_hit, header_extra)
+            )
         self.checks.append(
             {
                 "name": "recipient_header",
                 "ok": True,
-                "evidence": "開いた先のヘッダで宛名 '%s' を確認" % header_hit,
+                "evidence": header_evidence,
             }
         )
         # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
+        # 前方一致の場合はヘッダ文字列に誤読分が混ざっているため、
+        # エイリアスには指定名だけを使う (完全一致時のみ従来通り
+        # ヘッダで読めた文字列も候補にする)。
         aliases = [name]
-        header_name = header_hit.strip()
+        header_name = header_hit.strip() if header_match == "exact" else ""
         if header_name and header_name not in aliases:
             aliases.append(header_name)
         entry = {"aliases": aliases, "nav_click": [x, y]}

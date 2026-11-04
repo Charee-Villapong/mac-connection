@@ -129,6 +129,7 @@
     "ocr_threshold": 0.8,
     "post_send_wait": 1.0,
     "relearn_header_max_y": 260,
+    "relearn_header_prefix_max_extra": 2,
     "short_line_max_len": 8,
     "short_line_threshold": 0.9,
     "ssh_timeout": 240,
