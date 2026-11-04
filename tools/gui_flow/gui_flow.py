@@ -1640,6 +1640,29 @@ def classify_needs_calibration(error, checks, acfg, last_frame, tun=None):
     }
 
 
+def pre_send_recipient_error(r, record):
+    """送信前検閲の宛先系失敗のエラー名を決める。
+
+    record 側の recipient_error / error フィールド、無ければ Runner
+    属性 (recipient_header_error 等) の順に
+    "recipient_header_unreadable" / "wrong_recipient" の手がかりを
+    探し、どちらも無ければ従来通り "wrong_recipient" を返す。
+    「確認できず」を wrong_recipient と区別するための伝搬ヘルパー。
+    """
+    candidates = [
+        (record or {}).get("recipient_error"),
+        (record or {}).get("error"),
+        getattr(r, "recipient_header_error", None),
+        getattr(r, "recipient_error", None),
+        getattr(r, "recipient_verify_error", None),
+        getattr(r, "last_recipient_error", None),
+    ]
+    for cand in candidates:
+        if cand in ("wrong_recipient", "recipient_header_unreadable"):
+            return cand
+    return "wrong_recipient"
+
+
 def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     """post フロー: nav 精査 → 入力前ヘッダ確認 → 送信前 (入力 + 欄検閲)
     → 送信 → 送信後検閲。
@@ -1655,7 +1678,10 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     max_retries 回まで行う。それ以外の異常はリトライせず即停止する。
     送信前検閲で宛先違いが分かった場合 (入力済み) は、自分が入れた文
     を消して空に戻してから error=wrong_recipient で停止する (送信・
-    再実行はしない)。送信後検閲 NG は送り直さない。
+    再実行はしない)。送信前検閲の宛先が「確認できず」
+    (recipient_header_unreadable) で落ちた場合も後片付けは同じで、
+    返すエラー名だけを区別する (pre_send_recipient_error)。
+    送信後検閲 NG は送り直さない。
     on_sent は送信キーが成功した直後に 1 回だけ呼ばれる (承認の消費用)。
     承認ゲート自体は呼び出し側 (main) が開始前に済ませる。
 
@@ -1694,10 +1720,12 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
         info = {"count": retries_done, "attempts": attempts}
         if not retryable:
             if "recipient" in record["failed_checks"]:
-                # 宛先違い: 送信キーは絶対に押さず、自分が入れた文を
-                # 消して空に戻してから停止する (再実行はしない)
+                # 宛先違い / 確認できず: 送信キーは絶対に押さず、自分が
+                # 入れた文を消して空に戻してから停止する (再実行は
+                # しない)。後片付けは共通で、エラー名だけを
+                # recipient_header_unreadable / wrong_recipient で区別する
                 r.cleanup_wrong_recipient()
-                return False, "wrong_recipient", info
+                return False, pre_send_recipient_error(r, record), info
             return False, "pre_send_failed_stop", info
         if retries_done >= max_retries:
             return False, "pre_send_failed_retry_exhausted", info
@@ -1973,44 +2001,138 @@ class Runner:
         return cleaned
 
     def verify(self, text, mode, fetch_png=False):
-        holder = {}
+        """検閲: 撮影 + OCR 照合。recipient チェックは複数回判定。
 
-        def f():
-            name = self._name("verify")
-            extras = ["-ocr.txt"]
-            if fetch_png:
-                extras.append("-png.b64")
-            holder["res"] = self.mac.run_queue(
-                build_verify_script(name, self.app, self.acfg),
-                name,
-                extras=tuple(extras),
+        宛先 (recipient) チェックは check_recipient_header と同じ
+        共有ドライバ (_judge_header_multi) で判定する: 最大
+        header_check_attempts 回まで撮り直し、各回を MATCH / OTHER /
+        UNREADABLE に分類する (分類は run_verify_checks の recipient
+        チェックが返した actual_header に対して行い、領域スコープ等の
+        規則は単回チェックと同一に保つ)。OTHER が出たら残りの撮影を
+        せず打ち切る。recipient 以外のチェック (本文・構造等) は、
+        最後に撮影できた回の run_verify_checks 結果を使う。最終的な
+        recipient チェックは 1 件に集約して checks へ積み、各回の
+        ヘッダ文字列と分類を evidence と attempts に残す。
+        判定結果は self.recipient_header_error にも残す
+        (None / "wrong_recipient" / "recipient_header_unreadable")。
+        撮影自体が全回できなかった場合は従来通り verify_capture の
+        失敗として False を返す。
+        """
+        other_names = self.other_recipient_formal_names()
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        max_extra = int(
+            self.tunables.get(
+                "relearn_header_prefix_max_extra",
+                DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
             )
-            return holder["res"]
+        )
+        state = {"last_status": "no_result", "last_vchecks": None}
 
-        res = self._timed("verify", f)
-        st = res.get("status", "no_result")
-        if st != "ok":
+        def attempt_fn():
+            holder = {}
+
+            def f():
+                name = self._name("verify")
+                extras = ["-ocr.txt"]
+                if fetch_png:
+                    extras.append("-png.b64")
+                holder["res"] = self.mac.run_queue(
+                    build_verify_script(name, self.app, self.acfg),
+                    name,
+                    extras=tuple(extras),
+                )
+                return holder["res"]
+
+            res = self._timed("verify", f)
+            st = res.get("status", "no_result")
+            state["last_status"] = st
+            if st != "ok":
+                return {
+                    "classification": "UNREADABLE",
+                    "kind": None,
+                    "extra": 0,
+                    "run_text": None,
+                    "matched": None,
+                    "header": [],
+                }
+            if fetch_png:
+                self.last_png_bytes = decode_b64_bytes(
+                    res.get("_files", {}).get("-png.b64", "")
+                )
+            win = tuple(
+                int(float(v)) for v in res.get("window", "0 0 0 0 0").split()
+            )
+            if len(win) == 5:
+                self.last_frame = win[1:5]
+            ocr_text = res.get("_files", {}).get("-ocr.txt", "")
+            vchecks = run_verify_checks(
+                self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
+            )
+            state["last_vchecks"] = vchecks
+            rec = next(
+                (c for c in vchecks if c.get("name") == "recipient"), None
+            )
+            actual_header = list(rec.get("actual_header") or []) if rec else []
+            att = classify_header_attempt(
+                [(None, t) for t in actual_header],
+                aliases,
+                other_names,
+                prefix_max_extra=max_extra,
+            )
+            att["header"] = actual_header
+            return att
+
+        ok_multi, error, attempts = self._judge_header_multi(attempt_fn)
+        self.recipient_header_error = error
+        vchecks = state["last_vchecks"]
+        if vchecks is None:
             self.checks.append(
                 {
                     "name": "verify_capture",
                     "ok": False,
-                    "evidence": "検閲できず: status=%s" % st,
+                    "evidence": "検閲できず: status=%s" % state["last_status"],
                 }
             )
             return False
-        if fetch_png:
-            self.last_png_bytes = decode_b64_bytes(
-                res.get("_files", {}).get("-png.b64", "")
+        attempts_ev = header_attempts_evidence(attempts)
+        if ok_multi:
+            rec_evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s)" % (
+                len(attempts),
+                attempts_ev,
             )
-        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
-        if len(win) == 5:
-            self.last_frame = win[1:5]
-        ocr_text = res.get("_files", {}).get("-ocr.txt", "")
-        vchecks = run_verify_checks(
-            self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
-        )
-        self.checks.extend(vchecks)
-        return all(c["ok"] for c in vchecks)
+        elif error == "wrong_recipient":
+            rec_evidence = "宛先違いをヘッダで検出 (複数回判定 %d 回: %s)" % (
+                len(attempts),
+                attempts_ev,
+            )
+        else:
+            rec_evidence = (
+                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s)"
+                % (len(attempts), attempts_ev)
+            )
+        aggregated = {
+            "name": "recipient",
+            "ok": ok_multi,
+            "evidence": rec_evidence,
+            "expected": list(aliases),
+            "actual_header": [
+                t for a in attempts for t in (a.get("header") or [])
+            ],
+            "attempts": attempts,
+            "recipient_error": error,
+        }
+        final_checks = []
+        replaced = False
+        for c in vchecks:
+            if c.get("name") == "recipient" and not replaced:
+                final_checks.append(aggregated)
+                replaced = True
+            else:
+                final_checks.append(c)
+        if not replaced:
+            final_checks.insert(0, aggregated)
+        self.checks.extend(final_checks)
+        return all(c["ok"] for c in final_checks)
 
     def capture_png(self):
         """対象ウィンドウを撮影だけし、PNG を last_png_bytes に取り込む。
@@ -2084,7 +2206,14 @@ class Runner:
         _, retryable, names, summary = classify_pre_send(self.checks[start:])
         if passed:
             return True, False, {"failed_checks": [], "diff_summary": ""}
-        return False, retryable, {"failed_checks": names, "diff_summary": summary}
+        record = {"failed_checks": names, "diff_summary": summary}
+        if "recipient" in names:
+            # 宛先系の失敗は種別 (別人 / 確認できず) を record にも残し、
+            # run_post がエラー名を区別できるようにする
+            record["recipient_error"] = (
+                self.recipient_header_error or "wrong_recipient"
+            )
+        return False, retryable, record
 
     # --- 慎重モード (careful): 学習の経路 -------------------------------------
     # 高速パスが対応できないケースを段階的に解決し、学んだ座標・フレームを
