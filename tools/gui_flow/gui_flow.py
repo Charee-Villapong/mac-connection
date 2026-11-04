@@ -2059,9 +2059,7 @@ class Runner:
                 self.last_png_bytes = decode_b64_bytes(
                     res.get("_files", {}).get("-png.b64", "")
                 )
-            win = tuple(
-                int(float(v)) for v in res.get("window", "0 0 0 0 0").split()
-            )
+            win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
             if len(win) == 5:
                 self.last_frame = win[1:5]
             ocr_text = res.get("_files", {}).get("-ocr.txt", "")
@@ -2069,9 +2067,7 @@ class Runner:
                 self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
             )
             state["last_vchecks"] = vchecks
-            rec = next(
-                (c for c in vchecks if c.get("name") == "recipient"), None
-            )
+            rec = next((c for c in vchecks if c.get("name") == "recipient"), None)
             actual_header = list(rec.get("actual_header") or []) if rec else []
             att = classify_header_attempt(
                 [(None, t) for t in actual_header],
@@ -2115,9 +2111,7 @@ class Runner:
             "ok": ok_multi,
             "evidence": rec_evidence,
             "expected": list(aliases),
-            "actual_header": [
-                t for a in attempts for t in (a.get("header") or [])
-            ],
+            "actual_header": [t for a in attempts for t in (a.get("header") or [])],
             "attempts": attempts,
             "recipient_error": error,
         }
@@ -2210,9 +2204,7 @@ class Runner:
         if "recipient" in names:
             # 宛先系の失敗は種別 (別人 / 確認できず) を record にも残し、
             # run_post がエラー名を区別できるようにする
-            record["recipient_error"] = (
-                self.recipient_header_error or "wrong_recipient"
-            )
+            record["recipient_error"] = self.recipient_header_error or "wrong_recipient"
         return False, retryable, record
 
     # --- 慎重モード (careful): 学習の経路 -------------------------------------
@@ -2771,9 +2763,10 @@ class Runner:
         ok, error, attempts = self._judge_header_multi(attempt_fn)
         attempts_ev = header_attempts_evidence(attempts)
         if ok:
-            evidence = (
-                "宛先をヘッダで確認 (複数回判定 %d 回: %s / 想定宛先: %s)"
-                % (len(attempts), attempts_ev, "/".join(aliases))
+            evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s / 想定宛先: %s)" % (
+                len(attempts),
+                attempts_ev,
+                "/".join(aliases),
             )
         elif error == "wrong_recipient":
             evidence = (
@@ -2791,9 +2784,7 @@ class Runner:
                 "ok": ok,
                 "evidence": evidence,
                 "expected": list(aliases),
-                "actual_header": [
-                    t for a in attempts for t in (a.get("header") or [])
-                ],
+                "actual_header": [t for a in attempts for t in (a.get("header") or [])],
                 "attempts": attempts,
                 "recipient_error": error,
             }
@@ -2801,9 +2792,7 @@ class Runner:
         if not ok:
             self.recipient_header_error = error
             if error == "wrong_recipient":
-                other_att = next(
-                    a for a in attempts if a["classification"] == "OTHER"
-                )
+                other_att = next(a for a in attempts if a["classification"] == "OTHER")
                 self.wrong_recipient = {
                     "expected": list(aliases),
                     "actual_header": list(other_att.get("header") or []),
