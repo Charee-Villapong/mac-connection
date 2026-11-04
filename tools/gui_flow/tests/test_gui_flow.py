@@ -379,6 +379,9 @@ class FakeRunner:
     def check_recipient_header(self):
         return True
 
+    def scrutinize_nav(self):
+        return True
+
     def pre_send_once(self, text):
         self.pre_calls += 1
         return self.pre_results.pop(0)

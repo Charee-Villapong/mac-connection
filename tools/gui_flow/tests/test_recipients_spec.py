@@ -584,6 +584,9 @@ def test_approval_separation_expired_and_used_for_second_recipient(
 def test_wrong_recipient_for_second_recipient_cleans_up_and_never_sends(monkeypatch):
     monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
     runner = gui_flow.Runner(make_cfg(), "discord", to="bob")
+    # このテストの焦点はヘッダ確認ゲートであり、nav 精査は通過スタブにする
+    # (精査自体は test_nav_scrutiny_spec / impl が担保する)
+    runner.scrutinize_nav = lambda: True
     # ヘッダが既定宛先 Alice の画面を返すモックを付ける (宛先違いの再現)
     pre_send_with_mocked_mac(runner, DISCORD_TEXT, discord_ocr("Alice"))
     sent = []
