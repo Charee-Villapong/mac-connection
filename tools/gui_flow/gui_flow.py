@@ -1167,6 +1167,90 @@ def header_name_match(text, target, prefix_max_extra=0):
     return None, 0
 
 
+def text_runs(items, merge_px):
+    """OCR 項目を「行の中で横に連続した文字列」にまとめる (共有ヘルパー)。
+
+    縦位置が近い (merge_px 以内) 項目を同じ行とし、行の中では横の
+    間隔が近い項目同士を連結する。名前と人数表記が別項目に割れて
+    返ってきた場合は 1 つの文字列になり、行の右端にある時刻のような
+    離れた項目は別の文字列になる。
+    戻り値: [(中心点 (窓相対), 連結した文字列), ...]。中心点は文字列の
+    先頭項目の中心。並びは読み順 (行は上から、行内は左から)。
+    再学習・verify / post のヘッダ確認で共有する。
+    """
+    merge_px = float(merge_px)
+    rows = []
+    for it in sorted(items, key=lambda i: (i["y"], i["x"])):
+        if rows and abs(it["y"] - rows[-1]["y"]) <= merge_px:
+            rows[-1]["items"].append(it)
+        else:
+            rows.append({"y": it["y"], "items": [it]})
+    runs = []
+    for row in rows:
+        cur = None
+        for it in sorted(row["items"], key=lambda i: i["x"]):
+            if cur is not None and it["x"] - cur["right"] <= merge_px:
+                cur["text"] += it["text"]
+                cur["right"] = max(cur["right"], it["x"] + it["w"])
+                continue
+            if cur is not None:
+                runs.append(cur)
+            cur = {
+                "text": it["text"],
+                "right": it["x"] + it["w"],
+                "point": (
+                    int(it["x"] + it["w"] / 2),
+                    int(it["y"] + it["h"] / 2),
+                ),
+            }
+        if cur is not None:
+            runs.append(cur)
+    return [(r["point"], r["text"]) for r in runs]
+
+
+def header_region_runs(items, frame_width, list_ratio, max_y, merge_px):
+    """ヘッダ領域の項目だけを行単位の run にまとめて返す (共有ヘルパー)。
+
+    ヘッダ領域 = 項目の中心 x (x + w/2) がフレーム幅 × 一覧幅比を
+    超え、かつ y が上限未満の領域。トーク一覧 (左ペイン) に写った
+    宛先名を拾わないための領域スコープで、再学習と verify / post の
+    ヘッダ確認で共有する。
+    戻り値: [(中心点, run 文字列), ...] (読み順)。
+    """
+    limit_cx = float(frame_width) * float(list_ratio)
+    header_items = [
+        it
+        for it in items
+        if it["y"] < float(max_y)
+        and it["x"] + it["w"] / 2 > limit_cx
+        and norm(it["text"])
+    ]
+    return text_runs(header_items, merge_px)
+
+
+def header_alias_match(runs, aliases, prefix_max_extra=0):
+    """ヘッダ run 群と宛先エイリアス群の照合 (共有ヘルパー)。
+
+    各 run (読み順) × 各エイリアスに header_name_match を適用する。
+    exact があれば即座にそれを返し、無ければ最初に見つかった prefix
+    一致を返す。どちらも無ければ (None, 0, None, None)。
+    戻り値: (一致方式, 余り文字数, run 文字列, 一致したエイリアス)。
+    """
+    prefix_hit = None
+    for _point, text in runs:
+        for alias in aliases:
+            kind, extra = header_name_match(
+                text, alias, prefix_max_extra=prefix_max_extra
+            )
+            if kind == "exact":
+                return "exact", 0, text, alias
+            if kind == "prefix" and prefix_hit is None:
+                prefix_hit = ("prefix", extra, text, alias)
+    if prefix_hit is not None:
+        return prefix_hit
+    return None, 0, None, None
+
+
 def content_lines(app, text):
     """期待文のうち本文として照合する行 (Discord のフェンス行は除く)。"""
     lines = [ln for ln in text.split("\n")]
@@ -2108,43 +2192,12 @@ class Runner:
         return res.get("status") == "ok"
 
     def _text_runs(self, items):
-        """OCR 項目を「行の中で横に連続した文字列」にまとめる。
+        """OCR 項目を行単位の run にまとめる (共有ヘルパーへの委譲)。
 
-        縦位置が近い (talk_row_merge_px 以内) 項目を同じ行とし、行の
-        中では横の間隔が近い項目同士を連結する。名前と人数表記が別
-        項目に割れて返ってきた場合は 1 つの文字列になり、行の右端に
-        ある時刻のような離れた項目は別の文字列になる。
-        戻り値: [(中心点 (窓相対), 連結した文字列), ...]。
-        中心点は文字列の先頭項目の中心。
+        規則はモジュールレベルの text_runs と同じで、merge 間隔は
+        tunables の talk_row_merge_px を使う。
         """
-        merge_px = float(self.tunables["talk_row_merge_px"])
-        rows = []
-        for it in sorted(items, key=lambda i: (i["y"], i["x"])):
-            if rows and abs(it["y"] - rows[-1]["y"]) <= merge_px:
-                rows[-1]["items"].append(it)
-            else:
-                rows.append({"y": it["y"], "items": [it]})
-        runs = []
-        for row in rows:
-            cur = None
-            for it in sorted(row["items"], key=lambda i: i["x"]):
-                if cur is not None and it["x"] - cur["right"] <= merge_px:
-                    cur["text"] += it["text"]
-                    cur["right"] = max(cur["right"], it["x"] + it["w"])
-                    continue
-                if cur is not None:
-                    runs.append(cur)
-                cur = {
-                    "text": it["text"],
-                    "right": it["x"] + it["w"],
-                    "point": (
-                        int(it["x"] + it["w"] / 2),
-                        int(it["y"] + it["h"] / 2),
-                    ),
-                }
-            if cur is not None:
-                runs.append(cur)
-        return [(r["point"], r["text"]) for r in runs]
+        return text_runs(items, float(self.tunables["talk_row_merge_px"]))
 
     def talk_list_width_ratio(self):
         """トーク一覧とみなす横範囲 (窓幅比) をアプリ別に解決する。
@@ -2283,29 +2336,20 @@ class Runner:
         # 一覧側の完全一致 (クリック前に確定) が安全側の担保になる。
         # この判定はアプリ共通経路であり、LINE / Discord の両方に効く。
         fw2 = (_frame2 or frame)[2]
-        header_min_cx = fw2 * self.talk_list_width_ratio()
-        header_items = [
-            it
-            for it in items2
-            if it["y"] < header_limit
-            and it["x"] + it["w"] / 2 > header_min_cx
-            and norm(it["text"])
-        ]
         max_extra = int(self.tunables["relearn_header_prefix_max_extra"])
-        header_hit = None
-        header_match = None  # "exact" | "prefix"
-        header_extra = 0
-        prefix_hit = None
-        for _point, text in self._text_runs(header_items):
-            kind, extra = header_name_match(text, target, prefix_max_extra=max_extra)
-            if kind == "exact":
-                header_hit, header_match, header_extra = norm(text), "exact", 0
-                break
-            if kind == "prefix" and prefix_hit is None:
-                prefix_hit = (norm(text), extra)
-        if header_hit is None and prefix_hit is not None:
-            header_hit, header_extra = prefix_hit
-            header_match = "prefix"
+        header_runs = header_region_runs(
+            items2,
+            fw2,
+            self.talk_list_width_ratio(),
+            header_limit,
+            float(self.tunables["talk_row_merge_px"]),
+        )
+        kind, extra, run_text, _alias = header_alias_match(
+            header_runs, [target], prefix_max_extra=max_extra
+        )
+        header_hit = norm(run_text) if kind else None
+        header_match = kind  # "exact" | "prefix" | None
+        header_extra = extra if kind else 0
         if header_hit is None:
             self.checks.append(
                 {
