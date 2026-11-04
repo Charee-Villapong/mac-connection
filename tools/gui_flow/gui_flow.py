@@ -1019,16 +1019,54 @@ AWK_SELECT = r"""awk -v app="$APP" '
 END { print line }'"""
 
 
-def build_verify_script(name, app, acfg):
+def _script_number(value):
+    """スクリプト本文へ埋める数値リテラルの整形 (260.0 -> "260")。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if f == int(f):
+        return str(int(f))
+    return ("%f" % f).rstrip("0").rstrip(".")
+
+
+def build_verify_script(name, app, acfg, tun=None):
     """検閲フェーズ: ウィンドウ特定 → 撮影 → OCR。撮影はこの 1 回だけ。
 
     撮影した PNG は base64 化したコピーも作り、呼び出し側が求めた場合に
     テキスト経由で VM 側へ回収できるようにする (送信後スクショの受け渡し用)。
+    全体 OCR (-ocr.txt) に加えて、ヘッダ帯の切り出し OCR
+    (-header-ocr.txt) も作る: 撮影 PNG からヘッダ帯 (-header.png) を
+    sips で切り出し、その切り出し画像だけを ocr.swift で読む。切り出し
+    範囲は現行のヘッダ領域定義の読み替えで、x は PNG 幅 ×
+    talk_list_width_ratio から右、y は窓高さに対する
+    relearn_header_max_y 分 (窓相対 pt) の帯。ratio は acfg の
+    talk_list_width_ratio 優先 (無ければ tun)、max_y は tun 基準で
+    acfg に同名キーがあればそちらを拾う (run_verify_checks と同じ
+    解決順 + acfg 上書き)。数値はスクリプト本文にリテラルで現れる。
+    算出入力が不正なら切り出しをスキップし、-header-ocr.txt は
+    空のままにする (fail-safe: 呼び出し側は UNREADABLE として扱う)。
     """
+    if tun is None:
+        tun = DEFAULT_TUNABLES
+    ratio_v = (acfg or {}).get("talk_list_width_ratio")
+    if ratio_v is None:
+        ratio_v = tun.get(
+            "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
+        )
+    max_y_v = (acfg or {}).get("relearn_header_max_y")
+    if max_y_v is None:
+        max_y_v = tun.get(
+            "relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"]
+        )
+    ratio_lit = _script_number(ratio_v)
+    max_y_lit = _script_number(max_y_v)
     parts = [HDR]
     parts.append(
         "rm -f ~/muse-tools/gf-out/__NAME__-ocr.txt "
-        "~/muse-tools/gf-out/__NAME__-png.b64"
+        "~/muse-tools/gf-out/__NAME__-png.b64 "
+        "~/muse-tools/gf-out/__NAME__-header-ocr.txt "
+        "~/muse-tools/gf-out/__NAME__-header.png"
     )
     parts.append('APP="%s"' % acfg["window_app"])
     parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
@@ -1048,6 +1086,51 @@ def build_verify_script(name, app, acfg):
         "swift ~/muse-tools/ocr.swift ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-ocr.txt 2>&1"
     )
+    # ヘッダ帯の切り出し OCR (全体 OCR の後)。フレーム幅・高さは
+    # $WIN の第 4 / 5 フィールド (pt)、PNG 実寸は sips で取る (px)。
+    # 切り出し矩形 (x0 / 幅 / 高さ) は awk で算出し、PNG 高でクランプ
+    # する。入力が不正 (数値でない・0 以下等) なら CROP は空になり、
+    # 切り出しをスキップして -header-ocr.txt は空のままになる。
+    parts.append(": > ~/muse-tools/gf-out/__NAME__-header-ocr.txt")
+    parts.append('FW=$(printf %s "$WIN" | cut -d" " -f4)')
+    parts.append('FH=$(printf %s "$WIN" | cut -d" " -f5)')
+    parts.append(
+        "PW=$(sips -g pixelWidth ~/muse-tools/gf-out/__NAME__.png "
+        "2>/dev/null | awk '/pixelWidth/ {print $2}')"
+    )
+    parts.append(
+        "PH=$(sips -g pixelHeight ~/muse-tools/gf-out/__NAME__.png "
+        "2>/dev/null | awk '/pixelHeight/ {print $2}')"
+    )
+    parts.append(
+        'CROP=$(printf "%s %s %s %s" "$PW" "$PH" "$FW" "$FH" | '
+        "awk -v ratio=" + ratio_lit + " -v max_y=" + max_y_lit + " '"
+        "{ pw=$1; ph=$2; fw=$3; fh=$4; "
+        "if (pw<=0 || ph<=0 || fw<=0 || fh<=0) exit; "
+        "x0=int(pw*ratio+0.5); w=pw-x0; h=int(ph*max_y/fh+0.5); "
+        "if (h>ph) h=ph; "
+        "if (w<=0 || h<=0 || x0<0) exit; "
+        'print x0" "w" "h }\')'
+    )
+    parts.append('if [ -n "$CROP" ]; then')
+    parts.append('  X0=$(printf %s "$CROP" | cut -d" " -f1)')
+    parts.append('  CW=$(printf %s "$CROP" | cut -d" " -f2)')
+    parts.append('  CH=$(printf %s "$CROP" | cut -d" " -f3)')
+    # sips の cropOffset は (y, x) の順・左上原点 (Mac で実測済み)。
+    # ヘッダ帯は上端からなので y_px = 0。
+    parts.append(
+        "  sips -c $CH $CW --cropOffset 0 $X0 "
+        "~/muse-tools/gf-out/__NAME__.png "
+        "--out ~/muse-tools/gf-out/__NAME__-header.png >/dev/null 2>&1"
+    )
+    parts.append("  if [ -s ~/muse-tools/gf-out/__NAME__-header.png ]; then")
+    parts.append(
+        "    swift ~/muse-tools/ocr.swift "
+        "~/muse-tools/gf-out/__NAME__-header.png "
+        "> ~/muse-tools/gf-out/__NAME__-header-ocr.txt 2>&1"
+    )
+    parts.append("  fi")
+    parts.append("fi")
     parts.append('say "status=ok"')
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
