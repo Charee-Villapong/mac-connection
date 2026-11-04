@@ -123,6 +123,8 @@
   "tunables": {
     "approval_ttl_hours": 24,
     "connect_timeout": 60,
+    "header_check_attempts": 3,
+    "header_check_interval_sec": 0.5,
     "leak_threshold": 0.5,
     "long_line_threshold": 0.75,
     "max_pre_send_retries": 2,

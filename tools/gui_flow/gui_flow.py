@@ -163,6 +163,11 @@ DEFAULT_TUNABLES = {
     "talk_row_merge_px": 12,  # 行判定: 同じ行とみなす縦間隔と、横に連続
     # した文字列とみなす横間隔 (px)。再学習と verify/post のヘッダ確認
     # の run 化で共有する
+    "header_check_attempts": 3,  # ヘッダ宛先判定 (複数回判定) の撮影
+    # 回数上限。check_recipient_header と verify の recipient チェック
+    # で共有する
+    "header_check_interval_sec": 0.5,  # ヘッダ複数回判定で、撮影と
+    # 撮影の間に空ける間隔 (秒)。同上共有
     "nav_scrutiny_row_tolerance_px": 36,  # nav 精査: 保存済み nav_click と
     # 宛先本人の行を「同じ行」とみなす縦座標差の許容差 (px)。行間隔
     # (約 72px) の半分で、隣の行は別人の行として検出できる値
@@ -1256,6 +1261,87 @@ def header_alias_match(runs, aliases, prefix_max_extra=0):
     if prefix_hit is not None:
         return prefix_hit
     return None, 0, None, None
+
+
+def formal_names_of_others(recips, recipient_id):
+    """宛先以外の登録済み宛先の「正式名」リスト (OTHER 判定用・共有)。
+
+    正式名 = recipients 辞書のキー (宛先名そのもの) と、各エントリの
+    エイリアス先頭 (辞書キーと表記が異なる場合に画面に出る正式表記)。
+    短いエイリアス (2 件目以降) は含めない: 短い名前だけが読めた場合に
+    別人と断定しないため (その場合は UNREADABLE として扱う)。
+    """
+    names = []
+    for rid, entry in (recips or {}).items():
+        if rid == recipient_id:
+            continue
+        cands = [rid]
+        aliases = list((entry or {}).get("aliases") or [])
+        if aliases:
+            cands.append(aliases[0])
+        for cand in cands:
+            if cand and cand not in names:
+                names.append(cand)
+    return names
+
+
+def classify_header_attempt(runs, aliases, other_names, prefix_max_extra=0):
+    """1 回分のヘッダ run 群を MATCH / OTHER / UNREADABLE に分類 (共有)。
+
+    - MATCH: 宛先エイリアス (recipient_aliases) のいずれかに
+      header_name_match (exact / 前方一致 + 余り上限) で一致
+    - OTHER: 宛先以外の登録済み宛先の正式名に同じ規則で一致
+    - UNREADABLE: どちらにも一致しない
+    MATCH を先に判定する (宛先自身の名前に含まれる文字列で別宛先へ
+    誤分類しないため)。戻り値: dict (classification / kind / extra /
+    run_text / matched)。
+    """
+    kind, extra, run_text, matched = header_alias_match(
+        runs, aliases, prefix_max_extra=prefix_max_extra
+    )
+    if kind is not None:
+        return {
+            "classification": "MATCH",
+            "kind": kind,
+            "extra": extra,
+            "run_text": run_text,
+            "matched": matched,
+        }
+    for name in other_names or []:
+        k2, e2, rt2, _m = header_alias_match(
+            runs, [name], prefix_max_extra=prefix_max_extra
+        )
+        if k2 is not None:
+            return {
+                "classification": "OTHER",
+                "kind": k2,
+                "extra": e2,
+                "run_text": rt2,
+                "matched": name,
+            }
+    return {
+        "classification": "UNREADABLE",
+        "kind": None,
+        "extra": 0,
+        "run_text": None,
+        "matched": None,
+    }
+
+
+def header_attempts_evidence(attempts):
+    """複数回判定の各回 (ヘッダ文字列と分類) を証跡文字列にする (共有)。"""
+    parts = []
+    for a in attempts:
+        header = " / ".join(a.get("header") or []) or "(ヘッダ領域に文字列なし)"
+        desc = a["classification"]
+        if a.get("kind") == "exact":
+            desc += " (exact)"
+        elif a.get("kind") == "prefix":
+            desc += " (prefix、余り%d文字)" % a.get("extra", 0)
+        if a["classification"] == "OTHER" and a.get("matched"):
+            desc += " 別宛先 '%s'" % a["matched"]
+        parts.append("%d回目 [%s] -> %s" % (a["attempt"], header, desc))
+    return " / ".join(parts)
 
 
 def content_lines(app, text):
@@ -2429,20 +2515,76 @@ class Runner:
         )
         return True
 
+    def other_recipient_formal_names(self):
+        """宛先以外の登録済み宛先の正式名リスト (OTHER 判定用)。
+
+        アプリ設定の recipients 辞書から取る (formal_names_of_others)。
+        旧形式 (宛先 1 件だけ) の config では空になる。
+        """
+        recips, _default = recipients_of(self.app_cfg)
+        return formal_names_of_others(recips, self.recipient_id)
+
+    def _judge_header_multi(self, attempt_fn):
+        """ヘッダ複数回判定の共有ドライバ。
+
+        attempt_fn() は 1 回撮影し直して、classify_header_attempt の
+        結果に "header" (その回のヘッダ run 文字列リスト) を加えた
+        dict を返す。各回は必ず撮り直す (前回の画像・OCR の使い回し
+        禁止)。最大で tunables の header_check_attempts 回まで撮影し、
+        撮影と撮影の間には header_check_interval_sec 秒を
+        time.sleep で空ける。総合判定:
+        - OTHER が 1 回でも出たら残りの撮影をせず即失敗
+          (error="wrong_recipient")
+        - N 回撮り終えて OTHER 無し・MATCH 1 回以上で合格
+        - 全部 UNREADABLE なら「確認できず」で失敗
+          (error="recipient_header_unreadable"、wrong_recipient と区別)
+        MATCH が出ても早期終了はしない (打ち切るのは OTHER だけ)。
+        戻り値: (ok, error, attempts)。
+        """
+        n = int(
+            self.tunables.get(
+                "header_check_attempts", DEFAULT_TUNABLES["header_check_attempts"]
+            )
+        )
+        interval = float(
+            self.tunables.get(
+                "header_check_interval_sec",
+                DEFAULT_TUNABLES["header_check_interval_sec"],
+            )
+        )
+        attempts = []
+        for i in range(max(1, n)):
+            if i > 0:
+                time.sleep(interval)
+            att = dict(attempt_fn())
+            att["attempt"] = i + 1
+            attempts.append(att)
+            if att["classification"] == "OTHER":
+                break
+        if any(a["classification"] == "OTHER" for a in attempts):
+            return False, "wrong_recipient", attempts
+        if any(a["classification"] == "MATCH" for a in attempts):
+            return True, None, attempts
+        return False, "recipient_header_unreadable", attempts
+
     def check_recipient_header(self):
         """入力前に、開いたトークのヘッダだけで宛先を確認する。
 
-        nav_click があればその行をクリックして開いてから撮影・OCR
-        し、ヘッダ領域 (一覧より右・y 上限未満) の run だけを宛先
-        エイリアスと照合する (run_verify_checks の recipient チェック
-        と同じ共有ヘルパー・同じ共有キーを使う)。トーク一覧に写った
-        名前では合格しない。
-        戻り値: 一致したら True。結果は checks の recipient_header
-        に残す。不一致時は self.wrong_recipient (cleaned=False: まだ
-        何も入力していないため消すものは無い) と
+        nav_click があればその行をクリックして開いてから、複数回
+        判定 (共有ドライバ _judge_header_multi) でヘッダ領域
+        (一覧より右・y 上限未満) の run だけを宛先エイリアスと照合
+        する (run_verify_checks の recipient チェックと同じ共有
+        ヘルパー・同じ共有キーを使う)。トーク一覧に写った名前では
+        合格しない。各回の分類は MATCH / OTHER / UNREADABLE の 3 値で、
+        evidence と構造化フィールド (attempts) に各回のヘッダ文字列と
+        分類を残す。
+        戻り値: 合格したら True。結果は checks の recipient_header
+        に残す。OTHER (別人) の場合は self.wrong_recipient
+        (cleaned=False: まだ何も入力していないため消すものは無い) と
         self.recipient_header_error="wrong_recipient" を残す。
-        撮影自体ができない場合は recipient_header_error=
-        "recipient_header_unreadable" として False を返す。
+        全部 UNREADABLE (撮影・OCR ができない場合を含む) は
+        recipient_header_error="recipient_header_unreadable" として
+        False を返す (wrong_recipient とは区別する)。
         """
         self.recipient_header_error = None
         aliases = list(self.acfg.get("recipient_aliases", []))
@@ -2460,19 +2602,6 @@ class Runner:
                     }
                 )
                 return False
-        frame, items = self.capture_ocr()
-        if frame is None or not items:
-            self.recipient_header_error = "recipient_header_unreadable"
-            self.checks.append(
-                {
-                    "name": "recipient_header",
-                    "ok": False,
-                    "evidence": "ヘッダを読み取れなかった "
-                    "(撮影・OCR ができず宛先を確認できない / 想定宛先: %s)"
-                    % "/".join(aliases),
-                }
-            )
-            return False
         max_y = float(
             self.tunables.get(
                 "relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"]
@@ -2484,48 +2613,73 @@ class Runner:
                 DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
             )
         )
-        runs = header_region_runs(
-            items,
-            frame[2],
-            self.talk_list_width_ratio(),
-            max_y,
-            float(self.tunables["talk_row_merge_px"]),
-        )
-        actual_header = [text for _point, text in runs]
-        kind, extra, run_text, matched_alias = header_alias_match(
-            runs, aliases, prefix_max_extra=max_extra
-        )
-        if kind == "exact":
-            evidence = (
-                "宛先 '%s' をヘッダで確認 (一致方式: exact / "
-                "ヘッダ文字列: %s / 想定宛先: %s)"
-                % (run_text, " / ".join(actual_header), "/".join(aliases))
+        other_names = self.other_recipient_formal_names()
+
+        def attempt_fn():
+            frame, items = self.capture_ocr()
+            if frame is None or not items:
+                return {
+                    "classification": "UNREADABLE",
+                    "kind": None,
+                    "extra": 0,
+                    "run_text": None,
+                    "matched": None,
+                    "header": [],
+                }
+            runs = header_region_runs(
+                items,
+                frame[2],
+                self.talk_list_width_ratio(),
+                max_y,
+                float(self.tunables["talk_row_merge_px"]),
             )
-        elif kind == "prefix":
-            evidence = (
-                "宛先 '%s' をヘッダで確認 (一致方式: prefix、余り%d文字 / "
-                "ヘッダ文字列: %s / 想定宛先: %s)"
-                % (matched_alias, extra, " / ".join(actual_header), "/".join(aliases))
+            att = classify_header_attempt(
+                runs, aliases, other_names, prefix_max_extra=max_extra
             )
-        elif actual_header:
-            evidence = "宛先 (%s) がヘッダに見当たらない (ヘッダ文字列: %s)" % (
-                "/".join(aliases),
-                " / ".join(actual_header),
+            att["header"] = [text for _point, text in runs]
+            return att
+
+        ok, error, attempts = self._judge_header_multi(attempt_fn)
+        attempts_ev = header_attempts_evidence(attempts)
+        if ok:
+            evidence = (
+                "宛先をヘッダで確認 (複数回判定 %d 回: %s / 想定宛先: %s)"
+                % (len(attempts), attempts_ev, "/".join(aliases))
+            )
+        elif error == "wrong_recipient":
+            evidence = (
+                "宛先違いをヘッダで検出 (複数回判定 %d 回: %s / 想定宛先: %s)"
+                % (len(attempts), attempts_ev, "/".join(aliases))
             )
         else:
             evidence = (
-                "宛先 (%s) がヘッダに見当たらない (ヘッダ領域に文字列なし)"
-                % "/".join(aliases)
+                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s / "
+                "想定宛先: %s)" % (len(attempts), attempts_ev, "/".join(aliases))
             )
-        ok = kind is not None
-        self.checks.append({"name": "recipient_header", "ok": ok, "evidence": evidence})
-        if not ok:
-            self.wrong_recipient = {
+        self.checks.append(
+            {
+                "name": "recipient_header",
+                "ok": ok,
+                "evidence": evidence,
                 "expected": list(aliases),
-                "actual_header": actual_header,
-                "cleaned": False,
+                "actual_header": [
+                    t for a in attempts for t in (a.get("header") or [])
+                ],
+                "attempts": attempts,
+                "recipient_error": error,
             }
-            self.recipient_header_error = "wrong_recipient"
+        )
+        if not ok:
+            self.recipient_header_error = error
+            if error == "wrong_recipient":
+                other_att = next(
+                    a for a in attempts if a["classification"] == "OTHER"
+                )
+                self.wrong_recipient = {
+                    "expected": list(aliases),
+                    "actual_header": list(other_att.get("header") or []),
+                    "cleaned": False,
+                }
             return False
         return True
 

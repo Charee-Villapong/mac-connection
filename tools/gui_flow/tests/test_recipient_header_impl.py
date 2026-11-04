@@ -95,16 +95,18 @@ def test_check_header_prefix_passes():
     assert "prefix" in header_check(r)["evidence"]
 
 
-def test_check_header_list_name_only_fails_as_wrong_recipient():
+def test_check_header_list_name_only_fails_as_unreadable():
+    # フェーズ3 (複数回判定) で仕様変更: ヘッダの "someone-else" は
+    # 登録済み宛先の正式名ではないため OTHER ではなく UNREADABLE に
+    # 分類され、全回 UNREADABLE は recipient_header_unreadable で
+    # 失敗する (wrong_recipient になるのは登録済み別宛先の正式名が
+    # 読めた場合だけ。test_header_multi_impl.py で担保)。
     r = make_runner([list_item("example-dm"), header_item("someone-else")])
     assert r.check_recipient_header() is False
     assert header_check(r)["ok"] is False
-    assert r.recipient_header_error == "wrong_recipient"
-    assert r.wrong_recipient == {
-        "expected": ["example-dm"],
-        "actual_header": ["someone-else"],
-        "cleaned": False,
-    }
+    assert r.recipient_header_error == "recipient_header_unreadable"
+    assert r.wrong_recipient is None
+    assert "someone-else" in header_check(r)["evidence"]
 
 
 def test_check_header_unreadable_when_capture_fails():
