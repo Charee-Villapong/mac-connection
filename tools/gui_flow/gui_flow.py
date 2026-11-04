@@ -1138,6 +1138,31 @@ def ratio(a, b):
     return difflib.SequenceMatcher(None, norm(a), norm(b)).ratio()
 
 
+def header_name_match(text, target, prefix_max_extra=0):
+    """宛先チェック: ヘッダ等で読めた文字列と宛先名の照合 (アプリ非依存)。
+
+    戻り値: (一致方式, 余り文字数)。一致すれば ("exact", 0) または
+    ("prefix", n)、一致しなければ (None, 0)。
+    - exact: 正規化後に完全一致。
+    - prefix: 正規化後に「宛先名で始まり、余りが prefix_max_extra 文字
+      以内」。ヘッダ名の右にあるアイコンが OCR で名前の後ろに連結される
+      誤読 (例「<名前>4呼」) を吸収するための方式で、呼び出し側が
+      prefix_max_extra=0 (既定) にすれば従来の完全一致のみになる。
+    再学習のヘッダ確認が使う。将来 post / verify 側の宛先確認を寄せる
+    場合も、この関数の戻り値 (方式と余り) をそのまま証跡に使える。
+    """
+    t = norm(text)
+    g = norm(target)
+    if not t or not g:
+        return None, 0
+    if t == g:
+        return "exact", 0
+    extra = len(t) - len(g)
+    if prefix_max_extra > 0 and t.startswith(g) and 0 < extra <= prefix_max_extra:
+        return "prefix", extra
+    return None, 0
+
+
 def content_lines(app, text):
     """期待文のうち本文として照合する行 (Discord のフェンス行は除く)。"""
     lines = [ln for ln in text.split("\n")]
@@ -2247,8 +2272,8 @@ class Runner:
         # ヘッダ確認は、開いたトーク側の領域 (トーク一覧より右) に
         # 限定する。一覧は開いた後も左に残るため、帯の縦範囲だけで
         # 見ると一覧側の名前で合格してしまう。判定は行の中の連続した
-        # 文字列単位で、完全一致を必須にする (部分一致ではグループ
-        # トーク等を本人と取り違えるため)。
+        # 文字列単位で、照合は宛先チェック関数 header_name_match に
+        # 寄せる (アプリ非依存。ここでは完全一致のみを使う)。
         fw2 = (_frame2 or frame)[2]
         header_min_cx = fw2 * self.talk_list_width_ratio()
         header_items = [
@@ -2260,8 +2285,9 @@ class Runner:
         ]
         header_hit = None
         for _point, text in self._text_runs(header_items):
-            if norm(text) == target:
-                header_hit = text
+            kind, _extra = header_name_match(text, target)
+            if kind == "exact":
+                header_hit = norm(text)
                 break
         if header_hit is None:
             self.checks.append(
