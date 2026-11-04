@@ -151,7 +151,7 @@ DEFAULT_TUNABLES = {
     "long_line_threshold": 0.75,  # 通常行の一致しきい値
     "short_line_max_len": 8,  # 「短い行」とみなす最大文字数 (空白除去後)
     "leak_threshold": 0.5,  # 送信後検閲で「欄に本文が残っている」とみなす一致度
-    "talk_list_width_ratio": 0.32,  # 再学習でトーク一覧とみなす横範囲 (窓幅比)
+    "talk_list_width_ratio": 0.32,  # 再学習でトーク一覧とみなす横範囲 (窓幅比)。apps.<app> の同名キーでアプリ別に上書き可
     "relearn_header_max_y": 260,  # 再学習で「ヘッダ」とみなす縦範囲 (窓相対 px)
     "talk_row_merge_px": 12,  # 再学習の行判定: 同じ行とみなす縦間隔と、横に連続
     # した文字列とみなす横間隔 (px)
@@ -2117,6 +2117,20 @@ class Runner:
                 runs.append(cur)
         return [(r["point"], r["text"]) for r in runs]
 
+    def talk_list_width_ratio(self):
+        """トーク一覧とみなす横範囲 (窓幅比) をアプリ別に解決する。
+
+        apps.<app> の talk_list_width_ratio があればそれを優先し、
+        無ければ共通 tunables の値 (既定 0.32) を使う。一覧の幅は
+        アプリのレイアウト依存 (例: LINE の一覧は窓幅の約26%で、共通値
+        0.32 では開いた先のヘッダ名まで一覧側に含めてしまい、ヘッダ
+        確認が常時失敗する) のため、アプリ別の上書きを可能にする。
+        """
+        v = self.app_cfg.get("talk_list_width_ratio")
+        if v is None:
+            v = self.tunables["talk_list_width_ratio"]
+        return float(v)
+
     def find_talk_candidates(self, name, frame, items):
         """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
 
@@ -2130,7 +2144,7 @@ class Runner:
         if not target or not frame:
             return []
         fx, fy, fw, _fh = (int(v) for v in frame)
-        limit_x = fw * float(self.tunables["talk_list_width_ratio"])
+        limit_x = fw * self.talk_list_width_ratio()
         in_list = [it for it in items if it["x"] <= limit_x and norm(it["text"])]
         exact, partial = [], []
         for (px, py), text in self._text_runs(in_list):
@@ -2236,7 +2250,7 @@ class Runner:
         # 文字列単位で、完全一致を必須にする (部分一致ではグループ
         # トーク等を本人と取り違えるため)。
         fw2 = (_frame2 or frame)[2]
-        header_min_cx = fw2 * float(self.tunables["talk_list_width_ratio"])
+        header_min_cx = fw2 * self.talk_list_width_ratio()
         header_items = [
             it
             for it in items2

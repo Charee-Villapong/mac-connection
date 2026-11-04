@@ -152,7 +152,7 @@ python3 gui_flow.py discord careful
 | `long_line_threshold` | 0.75 | 通常行の一致しきい値 |
 | `short_line_max_len` | 8 | 「短い行」とみなす最大文字数（空白除去後） |
 | `leak_threshold` | 0.5 | 送信後検閲で「欄に本文が残っている」とみなす一致度 |
-| `talk_list_width_ratio` | 0.32 | 再学習でトーク一覧とみなす横範囲（窓幅比） |
+| `talk_list_width_ratio` | 0.32 | 再学習でトーク一覧とみなす横範囲（窓幅比）。`apps.<app>` の同名キーでアプリ別に上書き可（一覧の幅はアプリのレイアウト依存。例: LINE は 0.27） |
 | `relearn_header_max_y` | 260 | 再学習で「ヘッダ」とみなす縦範囲（窓相対 px） |
 | `talk_row_merge_px` | 12 | 再学習の行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px） |
 
