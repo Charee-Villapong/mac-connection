@@ -163,6 +163,9 @@ DEFAULT_TUNABLES = {
     "talk_row_merge_px": 12,  # 行判定: 同じ行とみなす縦間隔と、横に連続
     # した文字列とみなす横間隔 (px)。再学習と verify/post のヘッダ確認
     # の run 化で共有する
+    "nav_scrutiny_row_tolerance_px": 36,  # nav 精査: 保存済み nav_click と
+    # 宛先本人の行を「同じ行」とみなす縦座標差の許容差 (px)。行間隔
+    # (約 72px) の半分で、隣の行は別人の行として検出できる値
 }
 
 
@@ -1552,10 +1555,14 @@ def classify_needs_calibration(error, checks, acfg, last_frame, tun=None):
 
 
 def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
-    """post フロー: 入力前ヘッダ確認 → 送信前 (入力 + 欄検閲) → 送信
-    → 送信後検閲。
+    """post フロー: nav 精査 → 入力前ヘッダ確認 → 送信前 (入力 + 欄検閲)
+    → 送信 → 送信後検閲。
 
-    まず入力前に、開いているトークのヘッダだけで宛先を確認する
+    まず保存済み nav_click が宛先本人の行を指しているかを精査する
+    (scrutinize_nav)。ここで落ちたらヘッダ確認以降は一切呼ばずに
+    停止する。互換性のため getattr で取得し、メソッドを持たない
+    軽量フェイクでは精査をスキップする (実 Runner には常時存在する)。
+    次に入力前に、開いているトークのヘッダだけで宛先を確認する
     (check_recipient_header)。ここで落ちたら何も入力していないため、
     後片付けもせず即停止する。送信前が「本文の不一致」だけで落ちた
     場合に限り、欄を全消去して再入力する高速リトライを最大
@@ -1570,6 +1577,16 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     retry_info = {"count": リトライ実施回数,
                   "attempts": [各失敗回の failed_checks と差分要約]}
     """
+    scrutinize = getattr(r, "scrutinize_nav", None)
+    if scrutinize is not None and not scrutinize():
+        return (
+            False,
+            getattr(r, "nav_scrutiny_error", None) or "nav_scrutiny_failed",
+            {
+                "count": 0,
+                "attempts": [],
+            },
+        )
     if not r.check_recipient_header():
         return (
             False,
@@ -1643,6 +1660,7 @@ class Runner:
         self.overlay_blocked = False
         self.wrong_recipient = None
         self.recipient_header_error = None
+        self.nav_scrutiny_error = None
 
     def _name(self, action):
         self.counter += 1
@@ -2243,6 +2261,173 @@ class Runner:
             ),
         )
         return res.get("status") == "ok"
+
+    def scrutinize_nav(self):
+        """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
+        行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
+
+        一覧の並び替えで保存座標が別人の行を指すようになっている場合に、
+        その座標で開いてしまう事故を防ぐ前段ゲート。宛先エイリアス
+        ごとに find_talk_candidates で一覧探索し (再学習と同じ規則)、
+        返ってきた候補のうちエイリアスのいずれかと完全一致するもの
+        だけを「完全一致候補」とする (部分一致のみは候補に数えない)。
+        行の同一性は縦座標で判定する (横は一覧領域内であることが
+        候補の条件で担保される)。許容差は tunables の
+        nav_scrutiny_row_tolerance_px。
+
+        - 候補 1 件かつ保存座標と同じ行: 通過 (クリック・保存なし)
+        - 候補 1 件だが保存座標と違う行: その行をクリックして開き、
+          recipients 辞書の nav_click を候補座標へ更新して保存する
+          (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
+          同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
+          入力が新しい座標を使うようにする
+        - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
+          False を返し、self.nav_scrutiny_error に理由を残す
+          (クリックも設定変更もしない。修正クリック失敗時を除く)
+        - nav_click 未設定で候補 1 件: それを正として通過扱い
+        精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
+        この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
+        talk_list_width_ratio() がアプリ別に解決するため、LINE /
+        Discord の両方で同じ精査が効く。
+        結果は checks の nav_scrutiny に残す。戻り値: 通過なら True。
+        """
+        self.nav_scrutiny_error = None
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        frame, items = self.capture_ocr()
+        if frame is None or not items:
+            self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧を読み取れなかった "
+                    "(撮影・OCR ができず nav_click を精査できない / "
+                    "想定宛先: %s)" % "/".join(aliases),
+                }
+            )
+            return False
+        exact = []
+        seen_points = set()
+        for alias in aliases:
+            for x, y, text in self.find_talk_candidates(alias, frame, items):
+                if not any(norm(text) == norm(a) for a in aliases):
+                    continue
+                point = (int(x), int(y))
+                if point in seen_points:
+                    continue
+                seen_points.add(point)
+                exact.append((point, text))
+        if not exact:
+            self.nav_scrutiny_error = "nav_recipient_not_found"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が"
+                    "見つからない (部分一致のみは候補にしない)" % "/".join(aliases),
+                }
+            )
+            return False
+        if len(exact) > 1:
+            self.nav_scrutiny_error = "nav_recipient_ambiguous"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が "
+                    "%d 件あり特定できない (何も変更せず停止)"
+                    % ("/".join(aliases), len(exact)),
+                }
+            )
+            return False
+        (cx, cy), row_text = exact[0]
+        nav = self.acfg.get("nav_click")
+        if not nav:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "nav_click 未設定のため、トーク一覧で"
+                    "見つけた宛先 '%s' の行 (%d, %d) を正として通過"
+                    % (row_text, cx, cy),
+                }
+            )
+            return True
+        tolerance = float(
+            self.tunables.get(
+                "nav_scrutiny_row_tolerance_px",
+                DEFAULT_TUNABLES["nav_scrutiny_row_tolerance_px"],
+            )
+        )
+        if abs(cy - int(nav[1])) <= tolerance:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "保存済み nav_click (%d, %d) の行が宛先 "
+                    "'%s' 本人であることを確認 (候補行 (%d, %d) との"
+                    "縦座標差が許容差 %dpx 以内)"
+                    % (int(nav[0]), int(nav[1]), row_text, cx, cy, int(tolerance)),
+                }
+            )
+            return True
+        # 不一致: 保存座標が別人の行を指している。探索で見つけた
+        # 本人の行を開き、nav_click をその座標へ更新して保存する。
+        old_nav = [int(nav[0]), int(nav[1])]
+        new_nav = [cx, cy]
+        if self.click_point((cx, cy)) is False:
+            self.nav_scrutiny_error = "nav_scrutiny_click_failed"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "宛先 '%s' の行 (%d, %d) をクリック"
+                    "できなかったため、nav_click を更新せず停止" % (row_text, cx, cy),
+                }
+            )
+            return False
+        recips = self.app_cfg.get("recipients") or {}
+        if self.recipient_id is not None and self.recipient_id in recips:
+            recips[self.recipient_id]["nav_click"] = list(new_nav)
+        else:
+            # 旧形式 (アプリ直下の nav_click) の config への後方互換
+            self.app_cfg["nav_click"] = list(new_nav)
+        self.acfg["nav_click"] = list(new_nav)
+        backup = save_config(self.cfg)
+        append_learned_case(
+            {
+                "at": datetime.now(JST).isoformat(),
+                "app": self.app,
+                "item": "recipient_nav_click:" + str(self.recipient_id),
+                "old": old_nav,
+                "new": list(new_nav),
+                "reason": "nav 精査で保存座標が別人の行を指していたため、"
+                "一覧探索で見つけた宛先本人の行へ更新",
+            }
+        )
+        backup_note = (
+            "バックアップ: %s" % os.path.basename(backup) if backup else "保存済み"
+        )
+        self.checks.append(
+            {
+                "name": "nav_scrutiny",
+                "ok": True,
+                "evidence": "保存座標 (%d, %d) が別人の行を指していたため、"
+                "探索で見つけた宛先 '%s' の行 (%d, %d) に nav_click を"
+                "更新した (旧 %s → 新 %s / %s)"
+                % (
+                    old_nav[0],
+                    old_nav[1],
+                    row_text,
+                    cx,
+                    cy,
+                    old_nav,
+                    new_nav,
+                    backup_note,
+                ),
+            }
+        )
+        return True
 
     def check_recipient_header(self):
         """入力前に、開いたトークのヘッダだけで宛先を確認する。

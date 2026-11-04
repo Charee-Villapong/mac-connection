@@ -99,6 +99,7 @@ verify の 1 行目チェックもこの区別で実装しています。
 - **送信後スクショの受け渡し（`post` / `send`）**: 送信が成功したら、送信後検閲で撮影したキャプチャが VM 側の `~/workspace/mac-shots/gui-flow-<app>-<YYYYMMDD-HHMMSS>.png`（JST）に保存され、結果 JSON の `screenshot` フィールドにその絶対パスが入ります。エージェントはこのパスを開いてチャットで提示するだけです（Mac 側の作業フォルダから最新キャプチャを探す手順は不要になりました）。送信しなかった場合（承認ゲート停止・検閲 NG 等）は `screenshot` は `null` です。取得・保存に失敗した場合も送信自体は成功として扱い、`screenshot` は `null` で、理由が `checks` の `screenshot` 項目に残ります。
 - 異常（宛先不一致 / 入力欄に残りあり / ウィンドウが見つからない / 画面が読めないなど）を検知したら、**送信せずに停止**し、結果 JSON で報告します。
 - **宛先確認はヘッダ領域専用（LINE / Discord 共通）**: 宛先の合否は `run_verify_checks` の `recipient` チェックに一本化されており、開いたトークのヘッダ領域（中心 x が窓幅 × `talk_list_width_ratio` を超え、y が `relearn_header_max_y` 未満）にある文字列だけで判定します。判定は領域内の文字列を行単位の run にまとめ、完全一致（exact）、または余り `relearn_header_prefix_max_extra` 文字以内の前方一致（prefix）で行います。画面全体（トーク一覧など）に宛先名が写っていても合格しません。ヘッダ領域に文字列が無い場合も不合格です。チェック結果には方式・余りと、ヘッダ領域で実際に読めた run 文字列（`actual_header`）が残ります。再学習のヘッダ確認も同じ領域スコープ・同じ共有キーで判定します（対象外の別経路はありません）。
+- **ナビゲーション前の座標精査（`post`）**: `post` はヘッダ確認の前に `Runner.scrutinize_nav()` で、保存済み `nav_click` が宛先本人の行を指しているかをトーク一覧の OCR で精査します。一覧から宛先エイリアスと**完全一致**する行を探し（部分一致のみは候補にしません。再学習の一覧探索と同じ規則）、候補が 0 件なら `error=nav_recipient_not_found`、2 件以上なら `error=nav_recipient_ambiguous`、撮影・OCR ができなければ `error=nav_scrutiny_unreadable` で、クリックも設定変更もせず停止します。候補が 1 件で保存座標と同じ行（縦座標差が `nav_scrutiny_row_tolerance_px` 以内）なら通過します。候補が 1 件だが保存座標と違う行（＝並び替え等で保存座標が別人の行を指している）なら、その行をクリックして開き、`recipients` 辞書の `nav_click` を候補座標へ更新して保存します（書き込み前にバックアップ、学習記録へ追記。再学習の登録と同じ作法）。修正クリックに失敗した場合は `error=nav_scrutiny_click_failed` で停止します。`nav_click` 未設定で候補が 1 件なら、それを正として通過します。精査は文字入力・送信キーを絶対に行いません（行を開くクリックのみ）。この精査は Runner 共通経路で、一覧の幅比率はアプリ別に解決されるため、LINE / Discord の両方に効きます。
 - **入力前のヘッダ確認（`post`）**: `post` は入力を始める前に `Runner.check_recipient_header()` でヘッダだけを確認します（`nav_click` があればその行を開いてから撮影・OCR）。ここで不一致なら `error=wrong_recipient`、撮影自体ができなければ `error=recipient_header_unreadable` で停止し、入力・送信・後片付けは一切しません（まだ何も入力していないため消すものはありません。結果 JSON の `wrong_recipient.cleaned` は `false`）。送信前検閲で宛先違いが分かった場合（入力済み）の後片付けは従来通りです。
 - `post` は送信前検閲（入力の読み戻し照合 + 欄の OCR 照合）の全チェックが合格したときだけ送信キーに進みます。
 - **高速リトライ（`post` のみ）**: 送信前検閲が「本文の不一致」（読み戻し不一致・行単位照合 NG など）だけで落ちた場合は、慎重プロセスへ落とす前に、プログラム内で自動リトライします。手順は「入力欄を全消去（消すのはこの run で自分が入力した分だけ）→ 同じ文面を再入力 → 再検閲」で、最大 2 回までです。合格すればそのまま送信へ進み、2 回とも NG なら停止して報告します。リトライ 1 回の追加時間は実測で Discord 約 25 秒 / LINE 約 22 秒です。
@@ -158,6 +159,7 @@ python3 gui_flow.py discord careful
 | `relearn_header_max_y` | 260 | 「ヘッダ」とみなす縦範囲（窓相対 px）。**再学習と verify/post のヘッダ確認で共有**するキー（verify/post 用の新規キーは作らない） |
 | `relearn_header_prefix_max_extra` | 2 | ヘッダ確認で前方一致を許す余りの最大文字数。**再学習と verify/post のヘッダ確認で共有**するキー（verify/post 用の新規キーは作らない） |
 | `talk_row_merge_px` | 12 | 行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px）。再学習と verify/post のヘッダ確認の run 化で共有 |
+| `nav_scrutiny_row_tolerance_px` | 36 | nav 精査で、保存済み `nav_click` と宛先本人の行を「同じ行」とみなす縦座標差の許容差（px）。行間隔（約 72px）の半分で、隣の行は別人の行として検出できる値 |
 
 ### アプリ別 `careful`（慎重モードの調整値）
 

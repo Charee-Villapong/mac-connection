@@ -126,6 +126,7 @@
     "leak_threshold": 0.5,
     "long_line_threshold": 0.75,
     "max_pre_send_retries": 2,
+    "nav_scrutiny_row_tolerance_px": 36,
     "ocr_threshold": 0.8,
     "post_send_wait": 1.0,
     "relearn_header_max_y": 260,
