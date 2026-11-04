@@ -151,14 +151,18 @@ DEFAULT_TUNABLES = {
     "long_line_threshold": 0.75,  # 通常行の一致しきい値
     "short_line_max_len": 8,  # 「短い行」とみなす最大文字数 (空白除去後)
     "leak_threshold": 0.5,  # 送信後検閲で「欄に本文が残っている」とみなす一致度
-    "talk_list_width_ratio": 0.32,  # 再学習でトーク一覧とみなす横範囲 (窓幅比)。apps.<app> の同名キーでアプリ別に上書き可
-    "relearn_header_max_y": 260,  # 再学習で「ヘッダ」とみなす縦範囲 (窓相対 px)
-    "relearn_header_prefix_max_extra": 2,  # 再学習のヘッダ確認で前方一致を
-    # 許す余りの最大文字数。ヘッダ名の右のアイコンが OCR で名前の後ろに
-    # 連結される誤読 (例「<名前>4呼」) を吸収するための緩和で、完全一致
-    # しない場合に限り「指定名で始まり余りがこの文字数以内」を一致とする
-    "talk_row_merge_px": 12,  # 再学習の行判定: 同じ行とみなす縦間隔と、横に連続
-    # した文字列とみなす横間隔 (px)
+    "talk_list_width_ratio": 0.32,  # トーク一覧とみなす横範囲 (窓幅比)。再学習と verify/post のヘッダ確認で共有。apps.<app> の同名キーでアプリ別に上書き可
+    "relearn_header_max_y": 260,  # 「ヘッダ」とみなす縦範囲 (窓相対 px)。
+    # 再学習と verify/post のヘッダ確認で共有するキー (新規キーは作らない)
+    "relearn_header_prefix_max_extra": 2,  # ヘッダ確認で前方一致を
+    # 許す余りの最大文字数。再学習と verify/post のヘッダ確認で共有する
+    # キー (新規キーは作らない)。ヘッダ名の右のアイコンが OCR で名前の
+    # 後ろに連結される誤読 (例「<名前>4呼」) を吸収するための緩和で、
+    # 完全一致しない場合に限り「指定名で始まり余りがこの文字数以内」を
+    # 一致とする
+    "talk_row_merge_px": 12,  # 行判定: 同じ行とみなす縦間隔と、横に連続
+    # した文字列とみなす横間隔 (px)。再学習と verify/post のヘッダ確認
+    # の run 化で共有する
 }
 
 
@@ -1152,8 +1156,8 @@ def header_name_match(text, target, prefix_max_extra=0):
       以内」。ヘッダ名の右にあるアイコンが OCR で名前の後ろに連結される
       誤読 (例「<名前>4呼」) を吸収するための方式で、呼び出し側が
       prefix_max_extra=0 (既定) にすれば従来の完全一致のみになる。
-    再学習のヘッダ確認が使う。将来 post / verify 側の宛先確認を寄せる
-    場合も、この関数の戻り値 (方式と余り) をそのまま証跡に使える。
+    再学習と verify / post のヘッダ確認が共有する。この関数の戻り値
+    (方式と余り) をそのまま証跡に使う。
     """
     t = norm(text)
     g = norm(target)
@@ -1289,30 +1293,65 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
             }
         ]
     height = win[4]
-    header = [it for it in items if it["y"] < float(acfg.get("header_band", 110))]
 
-    # 1) 宛先
-    aliases = acfg.get("recipient_aliases", [])
-    hit = None
-    for scope_name, scope in (("header", header), ("all", items)):
-        for it in scope:
-            if any(norm(a) and norm(a) in norm(it["text"]) for a in aliases):
-                hit = (scope_name, it["text"])
-                break
-        if hit:
-            break
+    # 1) 宛先 (ヘッダ領域専用。画面全体では合格にしない)
+    # ヘッダ領域 = 中心 x がフレーム幅 × 一覧幅比を超え、y が上限未満。
+    # 一覧幅比は Runner.talk_list_width_ratio と同じ規則 (acfg の
+    # talk_list_width_ratio 優先、無ければ tunables の既定 0.32)。
+    # y 上限と前方一致の余り上限は再学習と共有のキー
+    # (relearn_header_max_y / relearn_header_prefix_max_extra) を使う。
+    # トーク一覧 (左ペイン) に写った宛先名では合格しない。
+    aliases = list(acfg.get("recipient_aliases", []))
+    ratio_v = (acfg or {}).get("talk_list_width_ratio")
+    if ratio_v is None:
+        ratio_v = tun.get(
+            "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
+        )
+    header_max_y = float(
+        tun.get("relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"])
+    )
+    max_extra = int(
+        tun.get(
+            "relearn_header_prefix_max_extra",
+            DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
+        )
+    )
+    merge_px = float(
+        tun.get("talk_row_merge_px", DEFAULT_TUNABLES["talk_row_merge_px"])
+    )
+    runs = header_region_runs(items, win[3], float(ratio_v), header_max_y, merge_px)
+    actual_header = [text for _point, text in runs]
+    kind, extra, run_text, matched_alias = header_alias_match(
+        runs, aliases, prefix_max_extra=max_extra
+    )
+    if kind == "exact":
+        evidence = "宛先 '%s' をヘッダで確認 (一致方式: exact / ヘッダ文字列: %s)" % (
+            run_text,
+            " / ".join(actual_header),
+        )
+    elif kind == "prefix":
+        evidence = (
+            "宛先 '%s' をヘッダで確認 (一致方式: prefix、余り%d文字 / "
+            "ヘッダ文字列: %s)" % (matched_alias, extra, " / ".join(actual_header))
+        )
+    elif actual_header:
+        evidence = "宛先 (%s) がヘッダに見当たらない (ヘッダ文字列: %s)" % (
+            "/".join(aliases),
+            " / ".join(actual_header),
+        )
+    else:
+        evidence = "宛先 (%s) がヘッダに見当たらない (ヘッダ領域に文字列なし)" % (
+            "/".join(aliases)
+        )
     checks.append(
         {
             "name": "recipient",
-            "ok": bool(hit),
-            "evidence": (
-                ("宛先 '%s' を %s で確認" % (hit[1], hit[0]))
-                if hit
-                else "宛先 (%s) が画面に見当たらない" % "/".join(aliases)
-            ),
-            # 宛先違いの報告用: 想定宛先と、実際にヘッダで読めた文字列
+            "ok": kind is not None,
+            "evidence": evidence,
+            # 宛先違いの報告用: 想定宛先と、ヘッダ領域で実際に読めた
+            # run 文字列の全て
             "expected": list(aliases),
-            "actual_header": [it["text"] for it in header][:5],
+            "actual_header": actual_header,
         }
     )
 
@@ -1513,11 +1552,15 @@ def classify_needs_calibration(error, checks, acfg, last_frame, tun=None):
 
 
 def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
-    """post フロー: 送信前 (入力 + 欄検閲) → 送信 → 送信後検閲。
+    """post フロー: 入力前ヘッダ確認 → 送信前 (入力 + 欄検閲) → 送信
+    → 送信後検閲。
 
-    送信前が「本文の不一致」だけで落ちた場合に限り、欄を全消去して
-    再入力する高速リトライを最大 max_retries 回まで行う。それ以外の
-    異常はリトライせず即停止する。宛先違いの場合は、自分が入れた文
+    まず入力前に、開いているトークのヘッダだけで宛先を確認する
+    (check_recipient_header)。ここで落ちたら何も入力していないため、
+    後片付けもせず即停止する。送信前が「本文の不一致」だけで落ちた
+    場合に限り、欄を全消去して再入力する高速リトライを最大
+    max_retries 回まで行う。それ以外の異常はリトライせず即停止する。
+    送信前検閲で宛先違いが分かった場合 (入力済み) は、自分が入れた文
     を消して空に戻してから error=wrong_recipient で停止する (送信・
     再実行はしない)。送信後検閲 NG は送り直さない。
     on_sent は送信キーが成功した直後に 1 回だけ呼ばれる (承認の消費用)。
@@ -1527,6 +1570,15 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
     retry_info = {"count": リトライ実施回数,
                   "attempts": [各失敗回の failed_checks と差分要約]}
     """
+    if not r.check_recipient_header():
+        return (
+            False,
+            getattr(r, "recipient_header_error", None) or "wrong_recipient",
+            {
+                "count": 0,
+                "attempts": [],
+            },
+        )
     attempts = []
     retries_done = 0
     while True:
@@ -1590,6 +1642,7 @@ class Runner:
         self.careful_screenshot = None
         self.overlay_blocked = False
         self.wrong_recipient = None
+        self.recipient_header_error = None
 
     def _name(self, action):
         self.counter += 1
@@ -2190,6 +2243,106 @@ class Runner:
             ),
         )
         return res.get("status") == "ok"
+
+    def check_recipient_header(self):
+        """入力前に、開いたトークのヘッダだけで宛先を確認する。
+
+        nav_click があればその行をクリックして開いてから撮影・OCR
+        し、ヘッダ領域 (一覧より右・y 上限未満) の run だけを宛先
+        エイリアスと照合する (run_verify_checks の recipient チェック
+        と同じ共有ヘルパー・同じ共有キーを使う)。トーク一覧に写った
+        名前では合格しない。
+        戻り値: 一致したら True。結果は checks の recipient_header
+        に残す。不一致時は self.wrong_recipient (cleaned=False: まだ
+        何も入力していないため消すものは無い) と
+        self.recipient_header_error="wrong_recipient" を残す。
+        撮影自体ができない場合は recipient_header_error=
+        "recipient_header_unreadable" として False を返す。
+        """
+        self.recipient_header_error = None
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        nav = self.acfg.get("nav_click")
+        if nav:
+            if not self.click_point(nav):
+                self.recipient_header_error = "recipient_header_unreadable"
+                self.checks.append(
+                    {
+                        "name": "recipient_header",
+                        "ok": False,
+                        "evidence": "宛先のトークを開けなかった "
+                        "(nav_click=%s のクリック失敗 / 想定宛先: %s)"
+                        % (list(nav), "/".join(aliases)),
+                    }
+                )
+                return False
+        frame, items = self.capture_ocr()
+        if frame is None or not items:
+            self.recipient_header_error = "recipient_header_unreadable"
+            self.checks.append(
+                {
+                    "name": "recipient_header",
+                    "ok": False,
+                    "evidence": "ヘッダを読み取れなかった "
+                    "(撮影・OCR ができず宛先を確認できない / 想定宛先: %s)"
+                    % "/".join(aliases),
+                }
+            )
+            return False
+        max_y = float(
+            self.tunables.get(
+                "relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"]
+            )
+        )
+        max_extra = int(
+            self.tunables.get(
+                "relearn_header_prefix_max_extra",
+                DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
+            )
+        )
+        runs = header_region_runs(
+            items,
+            frame[2],
+            self.talk_list_width_ratio(),
+            max_y,
+            float(self.tunables["talk_row_merge_px"]),
+        )
+        actual_header = [text for _point, text in runs]
+        kind, extra, run_text, matched_alias = header_alias_match(
+            runs, aliases, prefix_max_extra=max_extra
+        )
+        if kind == "exact":
+            evidence = (
+                "宛先 '%s' をヘッダで確認 (一致方式: exact / "
+                "ヘッダ文字列: %s / 想定宛先: %s)"
+                % (run_text, " / ".join(actual_header), "/".join(aliases))
+            )
+        elif kind == "prefix":
+            evidence = (
+                "宛先 '%s' をヘッダで確認 (一致方式: prefix、余り%d文字 / "
+                "ヘッダ文字列: %s / 想定宛先: %s)"
+                % (matched_alias, extra, " / ".join(actual_header), "/".join(aliases))
+            )
+        elif actual_header:
+            evidence = "宛先 (%s) がヘッダに見当たらない (ヘッダ文字列: %s)" % (
+                "/".join(aliases),
+                " / ".join(actual_header),
+            )
+        else:
+            evidence = (
+                "宛先 (%s) がヘッダに見当たらない (ヘッダ領域に文字列なし)"
+                % "/".join(aliases)
+            )
+        ok = kind is not None
+        self.checks.append({"name": "recipient_header", "ok": ok, "evidence": evidence})
+        if not ok:
+            self.wrong_recipient = {
+                "expected": list(aliases),
+                "actual_header": actual_header,
+                "cleaned": False,
+            }
+            self.recipient_header_error = "wrong_recipient"
+            return False
+        return True
 
     def _text_runs(self, items):
         """OCR 項目を行単位の run にまとめる (共有ヘルパーへの委譲)。
