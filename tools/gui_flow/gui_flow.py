@@ -1346,6 +1346,72 @@ def header_alias_match(runs, aliases, prefix_max_extra=0):
     return None, 0, None, None
 
 
+# ヘッダ候補拡張の有効化キー (apps.<app> 配下の真偽値)。アプリ名や
+# 文字列内容ではなく、この設定だけで拡張の有無を切り替える。
+HEADER_CANDIDATE_EXPANSION_KEY = "header_candidate_expansion"
+
+
+def _ocr_item_point(item):
+    """OCR 項目 (dict) の中心点。座標が取れなければ (0, 0)。"""
+    if isinstance(item, dict):
+        try:
+            return (
+                int(item["x"] + item["w"] / 2),
+                int(item["y"] + item["h"] / 2),
+            )
+        except (KeyError, TypeError, ValueError):
+            return (0, 0)
+    if isinstance(item, (tuple, list)) and len(item) == 2:
+        return item[0]
+    return (0, 0)
+
+
+def _ocr_item_text(item):
+    """OCR 項目 (dict / (中心点, 文字列)) から文字列を取り出す。"""
+    if isinstance(item, dict):
+        return item.get("text") or ""
+    if isinstance(item, (tuple, list)) and len(item) == 2:
+        return item[1] or ""
+    return ""
+
+
+def expand_header_candidates(runs, items=None):
+    """ヘッダ判定の候補群を拡張する (候補拡張が有効なアプリ専用)。
+
+    候補 = 従来の run 群 (先頭・そのままの順序) + 各 OCR 項目そのもの
+    + 各 run / 項目の空白区切りの第 1 トークン。同じ文字列の候補は
+    最初の 1 件だけを残すため、従来 run 由来の候補が常に優先される
+    (証跡の run_text も従来 run 由来が優先される)。判定規則自体は
+    変えず、返した候補群に既存の header_name_match (exact / prefix
+    余り上限) をそのまま適用する想定。区切りも項目分割も無い文字列は
+    第 1 トークンが文字列全体と同一になるため、新たな一致は生まれない。
+    戻り値: [(中心点, 文字列), ...] (text_runs と同じ形)。
+    """
+    expanded = [(point, text) for point, text in (runs or [])]
+    seen = {text for _point, text in expanded}
+    item_candidates = []
+    for item in items or []:
+        text = _ocr_item_text(item)
+        if not text:
+            continue
+        item_candidates.append((_ocr_item_point(item), text))
+    for point, text in item_candidates:
+        if text not in seen:
+            expanded.append((point, text))
+            seen.add(text)
+    sources = [(point, text) for point, text in (runs or [])]
+    sources.extend(item_candidates)
+    for point, text in sources:
+        parts = str(text).split()
+        if len(parts) < 2:
+            continue
+        token = parts[0]
+        if token and token not in seen:
+            expanded.append((point, token))
+            seen.add(token)
+    return expanded
+
+
 def formal_names_of_others(recips, recipient_id):
     """宛先以外の登録済み宛先の「正式名」リスト (OTHER 判定用・共有)。
 
@@ -1858,6 +1924,9 @@ class Runner:
         self.wrong_recipient = None
         self.recipient_header_error = None
         self.nav_scrutiny_error = None
+        # 直近の capture_header_runs が parse した切り出し OCR 項目。
+        # 候補拡張 (有効なアプリのみ) が項目候補を作るために保持する。
+        self._last_header_items = []
 
     def _name(self, action):
         self.counter += 1
@@ -2153,16 +2222,17 @@ class Runner:
                 self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
             )
             state["last_vchecks"] = vchecks
-            header_runs = self._text_runs(
-                parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
-            )
-            actual_header = [text for _point, text in header_runs]
+            header_items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
+            header_runs = self._text_runs(header_items)
+            actual_header = [run_text for _point, run_text in header_runs]
+            candidates = self._header_candidates(header_runs, header_items)
             att = classify_header_attempt(
-                header_runs,
+                candidates,
                 aliases,
                 other_names,
                 prefix_max_extra=max_extra,
             )
+            # 証跡の header は実際の OCR run のまま (拡張候補は混ぜない)
             att["header"] = actual_header
             return att
 
@@ -2555,8 +2625,11 @@ class Runner:
         全体 OCR (-ocr.txt) は取得も判定もしない。撮影ができなければ
         (None, [])、切り出しファイルが無い・空なら (フレーム, [])。
         checks には積まない (capture_ocr と同じ作法)。last_frame の
-        更新も capture_ocr と同様に行う。
+        更新も capture_ocr と同様に行う。戻り値 (フレーム, runs) は
+        従来通りで、parse した項目は self._last_header_items にも
+        保持する (候補拡張が有効なアプリで項目候補を作るため)。
         """
+        self._last_header_items = []
         name = self._name("verify")
         res = self._timed(
             "capture",
@@ -2573,6 +2646,7 @@ class Runner:
         if frame:
             self.last_frame = frame
         items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
+        self._last_header_items = items
         return frame, text_runs(items, float(self.tunables["talk_row_merge_px"]))
 
     def click_point(self, point):
@@ -2762,6 +2836,30 @@ class Runner:
         recips, _default = recipients_of(self.app_cfg)
         return formal_names_of_others(recips, self.recipient_id)
 
+    def header_candidate_expansion_enabled(self):
+        """ヘッダ候補拡張がこのアプリで有効か (config 駆動)。
+
+        apps.<app> 配下の header_candidate_expansion が真の場合のみ
+        有効。アプリ名のハードコードや文字列内容による分岐はしない。
+        実効設定 (self.acfg) 側にキーがあればそちらも見る。
+        """
+        for cfg in (self.app_cfg, self.acfg):
+            if cfg and cfg.get(HEADER_CANDIDATE_EXPANSION_KEY):
+                return True
+        return False
+
+    def _header_candidates(self, runs, items=None):
+        """宛先判定に渡す候補群を返す。
+
+        候補拡張が有効なアプリでのみ expand_header_candidates で
+        拡張する。無効なアプリ (LINE を含む) では runs をそのまま
+        (同一のオブジェクト・順序・内容で) 返すため、classify に
+        渡る run 群は現行と完全に同一になる。
+        """
+        if not self.header_candidate_expansion_enabled():
+            return runs
+        return expand_header_candidates(runs, items)
+
     def _judge_header_multi(self, attempt_fn):
         """ヘッダ複数回判定の共有ドライバ。
 
@@ -2859,9 +2957,13 @@ class Runner:
                     "matched": None,
                     "header": [],
                 }
-            att = classify_header_attempt(
-                runs, aliases, other_names, prefix_max_extra=max_extra
+            candidates = self._header_candidates(
+                runs, getattr(self, "_last_header_items", None)
             )
+            att = classify_header_attempt(
+                candidates, aliases, other_names, prefix_max_extra=max_extra
+            )
+            # 証跡の header は実際の OCR run のまま (拡張候補は混ぜない)
             att["header"] = [text for _point, text in runs]
             return att
 
