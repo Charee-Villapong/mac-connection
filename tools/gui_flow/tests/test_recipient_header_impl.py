@@ -1,0 +1,134 @@
+"""check_recipient_header の実装側回帰テスト (Mac 接続はモックで切り分け)。
+
+仕様テスト (test_recipient_header_spec.py) が担保する公開仕様に加え、
+Runner.check_recipient_header の分岐 (クリック失敗 / 撮影不可 /
+不一致時の状態) を実装側で固定する。
+
+実行: python3 -m pytest tools/gui_flow/tests -q
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import gui_flow  # noqa: E402
+
+FRAME = (0, 30, 1440, 870)
+
+CFG = {
+    "ssh": {
+        "user": "test-user",
+        "host": "192.0.2.1",
+        "identity": "/tmp/id_test",
+        "proxy_script": "/tmp/proxy.sh",
+        "control_path": "/tmp/gf-test-ctl",
+    },
+    "apps": {
+        "discord": {
+            "app_name": "Discord",
+            "window_app": "Discord",
+            "process": "Discord",
+            "input_click": [700, 852],
+            "nav_click": [174, 350],
+            "recipient_aliases": ["example-dm"],
+            "header_band": 110,
+        },
+        "line": {
+            "app_name": "LINE",
+            "window_app": "LINE",
+            "process": "LINE",
+            "input_click": [800, 780],
+            "nav_click": [210, 160],
+            "recipient_aliases": ["example-talk"],
+            "header_band": 110,
+        },
+    },
+}
+
+
+def item(x, y, text, w=200, h=20):
+    return {"x": x, "y": y, "w": w, "h": h, "conf": 1.0, "text": text}
+
+
+def header_item(text):
+    # 中心 x = 600 (一覧境界 460.8 より右)、y = 60 (上限 260 未満)
+    return item(500, 60, text)
+
+
+def list_item(text):
+    # 中心 x = 200 (トーク一覧側)
+    return item(100, 60, text)
+
+
+def make_runner(items, click_ok=True, nav_click=True):
+    r = gui_flow.Runner(CFG, "discord")
+    if not nav_click:
+        r.acfg = dict(r.acfg)
+        r.acfg.pop("nav_click", None)
+    clicks = []
+    r.click_point = lambda point: clicks.append(point) or click_ok
+    r.capture_ocr = lambda: (FRAME, list(items))
+    r._test_clicks = clicks
+    return r
+
+
+def header_check(r):
+    found = [c for c in r.checks if c["name"] == "recipient_header"]
+    assert found, "checks に recipient_header の記録が無い"
+    return found[-1]
+
+
+def test_check_header_exact_passes_and_clicks_nav():
+    r = make_runner([header_item("example-dm")])
+    assert r.check_recipient_header() is True
+    assert r._test_clicks == [[174, 350]]
+    assert header_check(r)["ok"] is True
+    assert "exact" in header_check(r)["evidence"]
+    assert r.recipient_header_error is None
+    assert r.wrong_recipient is None
+
+
+def test_check_header_prefix_passes():
+    r = make_runner([header_item("example-dm4呼")])  # 余り 2 文字
+    assert r.check_recipient_header() is True
+    assert "prefix" in header_check(r)["evidence"]
+
+
+def test_check_header_list_name_only_fails_as_wrong_recipient():
+    r = make_runner([list_item("example-dm"), header_item("someone-else")])
+    assert r.check_recipient_header() is False
+    assert header_check(r)["ok"] is False
+    assert r.recipient_header_error == "wrong_recipient"
+    assert r.wrong_recipient == {
+        "expected": ["example-dm"],
+        "actual_header": ["someone-else"],
+        "cleaned": False,
+    }
+
+
+def test_check_header_unreadable_when_capture_fails():
+    r = make_runner([])
+    r.capture_ocr = lambda: (None, [])
+    assert r.check_recipient_header() is False
+    assert header_check(r)["ok"] is False
+    assert r.recipient_header_error == "recipient_header_unreadable"
+    assert r.wrong_recipient is None
+
+
+def test_check_header_click_failure_skips_capture():
+    r = make_runner([header_item("example-dm")], click_ok=False)
+
+    def boom():
+        raise AssertionError("クリック失敗時は撮影してはいけない")
+
+    r.capture_ocr = boom
+    assert r.check_recipient_header() is False
+    assert header_check(r)["ok"] is False
+    assert r.recipient_header_error == "recipient_header_unreadable"
+
+
+def test_check_header_without_nav_click_still_checks():
+    r = make_runner([header_item("example-dm")], nav_click=False)
+    assert r.check_recipient_header() is True
+    assert r._test_clicks == []
