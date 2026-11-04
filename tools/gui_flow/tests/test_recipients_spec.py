@@ -103,7 +103,7 @@ def discord_ocr(header):
 
 
 def line_ocr(header):
-    lines = [ocr_line(144, 130, header)]
+    lines = [ocr_line(454, 130, header)]
     y = 460
     for ln in LINE_TEXT.splitlines():
         lines.append(ocr_line(454, y, ln))
@@ -593,12 +593,16 @@ def test_wrong_recipient_for_second_recipient_cleans_up_and_never_sends(monkeypa
     assert ok is False
     assert error == "wrong_recipient"
     assert info["count"] == 0
+    # ヘッダ確認ゲート (入力前) で止まるため、run_post 内ではまだ
+    # 何も入力しておらず後片付けは不要 (cleaned=False)。入力済みの
+    # 宛先違いで後片付けする経路は test_gui_flow 側の
+    # test_post_wrong_recipient_cleans_up_and_stops が担保する。
     assert runner.wrong_recipient == {
         "expected": ["Bob", "bobby"],
         "actual_header": ["Alice"],
-        "cleaned": True,
+        "cleaned": False,
     }
     assert sent == []  # 送信成功扱いにならない (承認を消費しない)
     check_names = {c["name"]: c["ok"] for c in runner.checks}
-    assert check_names["wrong_recipient_cleanup"] is True
-    assert check_names["field_cleared"] is True
+    assert check_names["recipient_header"] is False
+    assert "send_key" not in check_names  # 送信キーを押していない

@@ -118,7 +118,7 @@ def test_verify_discord_field_ok():
 def test_verify_line_field_ok():
     ocr = "\n".join(
         [
-            ocr_line(144, 130, "example-talk"),
+            ocr_line(454, 130, "example-talk"),
             ocr_line(454, 460, "【AIエージェントからのお知らせ】"),
             ocr_line(454, 484, "これはテストです。"),
             ocr_line(454, 508, "送信はしません。"),
@@ -375,6 +375,9 @@ class FakeRunner:
         self.send_calls = 0
         self.cleanup_calls = 0
         self.verify_fetch_png = None
+
+    def check_recipient_header(self):
+        return True
 
     def pre_send_once(self, text):
         self.pre_calls += 1
