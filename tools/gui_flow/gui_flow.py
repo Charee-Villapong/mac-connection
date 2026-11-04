@@ -18,6 +18,13 @@ gui_flow — LINE / Discord の GUI 送信を一気通貫で実行する単一 C
   gui_flow.py discord careful                      # 慎重モード (学習。送信なし)
   gui_flow.py line    ... 同上
 
+宛先は --to <宛先IDまたは名前> で指定できる (未指定なら config の
+default_recipient)。宛先はアプリごとに config の recipients 辞書で持ち、
+宛先固有の値 (照合用エイリアス・トークを開く座標) だけを辞書側に置く。
+--to で辞書に無い宛先を指定して careful を呼ぶと、再学習フローに入る:
+画面を撮影してトーク一覧からその宛先の行を探し、座標を再取得して
+辞書へ新しい変数として登録する (登録できなければ何も登録せず停止)。
+
 出力: 標準出力に JSON (合否・チェック内訳・各ステップ所要秒数)。
 終了コード: 0 = 全チェック合格, 2 = 異常検知または失敗。
 
@@ -144,6 +151,10 @@ DEFAULT_TUNABLES = {
     "long_line_threshold": 0.75,  # 通常行の一致しきい値
     "short_line_max_len": 8,  # 「短い行」とみなす最大文字数 (空白除去後)
     "leak_threshold": 0.5,  # 送信後検閲で「欄に本文が残っている」とみなす一致度
+    "talk_list_width_ratio": 0.32,  # 再学習でトーク一覧とみなす横範囲 (窓幅比)
+    "relearn_header_max_y": 260,  # 再学習で「ヘッダ」とみなす縦範囲 (窓相対 px)
+    "talk_row_merge_px": 12,  # 再学習の行判定: 同じ行とみなす縦間隔と、横に連続
+    # した文字列とみなす横間隔 (px)
 }
 
 
@@ -242,7 +253,22 @@ def save_config(cfg, path=None, now=None):
     """config を保存し、書き込み前に取ったバックアップのパスを返す。"""
     path = path or config_path()
     now = now or datetime.now(JST)
-    backup = "%s.bak-%s" % (path, now.strftime("%Y%m%d-%H%M%S"))
+    stamp = now.strftime("%Y%m%d-%H%M%S")
+    backup = "%s.bak-%s" % (path, stamp)
+    if os.path.exists(backup):
+        # バックアップ名は秒単位のため、同秒に複数回保存すると先行する
+        # バックアップ (登録前の状態等) を上書きしてしまう。ミリ秒と
+        # 連番を足して一意にする。
+        backup = "%s.bak-%s-%03d" % (path, stamp, now.microsecond // 1000)
+        n = 1
+        while os.path.exists(backup):
+            n += 1
+            backup = "%s.bak-%s-%03d-%d" % (
+                path,
+                stamp,
+                now.microsecond // 1000,
+                n,
+            )
     if os.path.exists(path):
         with open(path, "rb") as f:
             data = f.read()
@@ -293,6 +319,77 @@ def recipient_key(acfg):
     """宛先の識別子 (config の宛先エイリアスの先頭)。"""
     aliases = acfg.get("recipient_aliases", [])
     return aliases[0] if aliases else ""
+
+
+# --- 宛先の変数化 (recipients 辞書) ------------------------------------------
+# 宛先はアプリごとに config の "recipients" 辞書で持つ。キー = 宛先 ID、
+# 値 = その宛先固有の値だけ (aliases = 照合用エイリアス、nav_click =
+# その宛先のトークを開くための座標)。ウィンドウ全体で共通の値
+# (フレーム・入力欄座標など) はアプリ側に残す。"default_recipient" が
+# 未指定 (--to なし) のときの宛先 ID。
+# 旧形式 (アプリ直下の recipient_aliases / nav_click) の config は、
+# 既定宛先 1 件だけの辞書として読み替える (後方互換)。
+
+
+def recipients_of(acfg):
+    """アプリ設定から (宛先辞書, 既定宛先 ID) を返す。"""
+    recips = (acfg or {}).get("recipients")
+    if recips:
+        default = (acfg or {}).get("default_recipient")
+        if default not in recips:
+            default = next(iter(recips))
+        return recips, default
+    aliases = list((acfg or {}).get("recipient_aliases") or [])
+    if not aliases:
+        return {}, None
+    entry = {"aliases": aliases}
+    if (acfg or {}).get("nav_click"):
+        entry["nav_click"] = list(acfg["nav_click"])
+    return {aliases[0]: entry}, aliases[0]
+
+
+def find_recipient(acfg, to):
+    """--to の指定を宛先辞書から解決する。
+
+    戻り値: (宛先 ID, 宛先エントリ)。to が None / 空なら既定宛先。
+    辞書に無い宛先なら (None, None)。ID の完全一致 → ID・エイリアスの
+    正規化一致、の順で探す。
+    """
+    recips, default = recipients_of(acfg)
+    if to is None or not str(to).strip():
+        if default is None:
+            return None, None
+        return default, recips[default]
+    t = str(to).strip()
+    if t in recips:
+        return t, recips[t]
+    nt = norm(t)
+    for rid, entry in recips.items():
+        if norm(rid) == nt:
+            return rid, entry
+        if any(norm(a) == nt for a in entry.get("aliases", [])):
+            return rid, entry
+    return None, None
+
+
+def effective_acfg(acfg, entry):
+    """宛先エントリを重ねた「実効アプリ設定」を返す。
+
+    アプリ側の共通値 (フレーム・入力欄座標・careful 等) を土台に、
+    宛先固有の値だけを上書きする。aliases は従来の recipient_aliases
+    として渡す (検閲・承認ゲートはこの形で宛先を見る)。
+    """
+    eff = {
+        k: v
+        for k, v in (acfg or {}).items()
+        if k not in ("recipients", "default_recipient")
+    }
+    for k, v in (entry or {}).items():
+        if k == "aliases":
+            eff["recipient_aliases"] = list(v)
+        else:
+            eff[k] = v
+    return eff
 
 
 def _parse_dt(s):
@@ -996,6 +1093,22 @@ def build_snapshot_script(name, app, acfg, width):
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
 
+def build_click_script(name, app, acfg, point):
+    """クリックだけのフェーズ: 前面化 → 指定点を 1 回クリック。
+
+    再学習フローでトーク一覧の行を開くために使う。テキスト入力も
+    送信キーも一切送らない。
+    """
+    parts = [HDR]
+    parts.append('open -a "%s"' % acfg["app_name"])
+    parts.append("sleep 0.8")
+    parts.append("$GH click %d %d" % (int(point[0]), int(point[1])))
+    parts.append("sleep 0.6")
+    parts.append('say "clicked=%d %d"' % (int(point[0]), int(point[1])))
+    parts.append('say "status=ok"')
+    return ("\n".join(parts) + "\n").replace("__NAME__", name)
+
+
 # --- OCR 解析と照合 ------------------------------------------------------------
 
 OCR_RE = re.compile(
@@ -1339,11 +1452,21 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
 
 
 class Runner:
-    def __init__(self, cfg, app):
+    def __init__(self, cfg, app, to=None):
         self.cfg = cfg
         self.mac = Mac(cfg)
         self.app = app
-        self.acfg = cfg["apps"][app]
+        self.app_cfg = cfg["apps"][app]
+        # 宛先の解決: --to 未指定なら既定宛先。辞書に無い宛先は
+        # recipient_known=False となり、careful の再学習フロー以外は
+        # 呼び出し側 (main) が unknown_recipient で停止する。
+        self.to_name = str(to).strip() if to and str(to).strip() else None
+        self.recipient_id, entry = find_recipient(self.app_cfg, self.to_name)
+        self.recipient_known = entry is not None
+        self.acfg = effective_acfg(self.app_cfg, entry)
+        if self.recipient_id is not None:
+            self.acfg["recipient_id"] = self.recipient_id
+        self.relearn_error = None
         self.tunables = tunables(cfg)
         self.post_send_wait = float(self.tunables["post_send_wait"])
         self.steps = []
@@ -1921,8 +2044,295 @@ class Runner:
             )
         return res
 
-    def careful(self):
+    def capture_ocr(self):
+        """対象ウィンドウを撮影し、(フレーム, OCR items) を返す。
+
+        撮影・OCR ができなければ (None, [])。checks には積まない
+        (呼び出し側が文脈に合ったチェック名で記録する)。
+        """
+        name = self._name("verify")
+        res = self._timed(
+            "capture",
+            lambda: self.mac.run_queue(
+                build_verify_script(name, self.app, self.acfg),
+                name,
+                extras=("-ocr.txt",),
+            ),
+        )
+        if res.get("status") != "ok":
+            return None, []
+        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
+        frame = win[1:5] if len(win) == 5 else None
+        if frame:
+            self.last_frame = frame
+        return frame, parse_ocr(res.get("_files", {}).get("-ocr.txt", ""))
+
+    def click_point(self, point):
+        """指定点を 1 回クリックする (前面化つき)。送信キーは送らない。"""
+        name = self._name("click")
+        res = self._timed(
+            "click",
+            lambda: self.mac.run_queue(
+                build_click_script(name, self.app, self.acfg, point), name
+            ),
+        )
+        return res.get("status") == "ok"
+
+    def _text_runs(self, items):
+        """OCR 項目を「行の中で横に連続した文字列」にまとめる。
+
+        縦位置が近い (talk_row_merge_px 以内) 項目を同じ行とし、行の
+        中では横の間隔が近い項目同士を連結する。名前と人数表記が別
+        項目に割れて返ってきた場合は 1 つの文字列になり、行の右端に
+        ある時刻のような離れた項目は別の文字列になる。
+        戻り値: [(中心点 (窓相対), 連結した文字列), ...]。
+        中心点は文字列の先頭項目の中心。
+        """
+        merge_px = float(self.tunables["talk_row_merge_px"])
+        rows = []
+        for it in sorted(items, key=lambda i: (i["y"], i["x"])):
+            if rows and abs(it["y"] - rows[-1]["y"]) <= merge_px:
+                rows[-1]["items"].append(it)
+            else:
+                rows.append({"y": it["y"], "items": [it]})
+        runs = []
+        for row in rows:
+            cur = None
+            for it in sorted(row["items"], key=lambda i: i["x"]):
+                if cur is not None and it["x"] - cur["right"] <= merge_px:
+                    cur["text"] += it["text"]
+                    cur["right"] = max(cur["right"], it["x"] + it["w"])
+                    continue
+                if cur is not None:
+                    runs.append(cur)
+                cur = {
+                    "text": it["text"],
+                    "right": it["x"] + it["w"],
+                    "point": (
+                        int(it["x"] + it["w"] / 2),
+                        int(it["y"] + it["h"] / 2),
+                    ),
+                }
+            if cur is not None:
+                runs.append(cur)
+        return [(r["point"], r["text"]) for r in runs]
+
+    def find_talk_candidates(self, name, frame, items):
+        """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
+
+        戻り値: [(click_x, click_y, ocr_text), ...]。
+        判定は行の中の連続した文字列単位で行い (名前と人数表記が別
+        項目に割れていれば連結した文字列で見る)、完全一致する文字列
+        があればそれだけを、無ければ名前を含む文字列を候補にする。
+        クリック点は画面絶対座標。
+        """
+        target = norm(name)
+        if not target or not frame:
+            return []
+        fx, fy, fw, _fh = (int(v) for v in frame)
+        limit_x = fw * float(self.tunables["talk_list_width_ratio"])
+        in_list = [it for it in items if it["x"] <= limit_x and norm(it["text"])]
+        exact, partial = [], []
+        for (px, py), text in self._text_runs(in_list):
+            text_n = norm(text)
+            entry = (int(fx + px), int(fy + py), text)
+            if text_n == target:
+                exact.append(entry)
+            elif target in text_n:
+                partial.append(entry)
+        return exact if exact else partial
+
+    def relearn_recipient(self, name):
+        """未知宛先の再学習: 座標の再取得 → 辞書への変数登録。
+
+        流れ: 画面を撮影し、トーク一覧から指定名の行を探す → その行の
+        座標をクリックして開く → 開いた先のヘッダの宛名が指定名と
+        一致するか OCR で確認する → 一致したら、その座標 (nav_click) と
+        照合用エイリアスを config の recipients 辞書へ新しい変数として
+        登録する (書き込み前にバックアップ + 学習記録へ追記)。
+        見つからない / 同じ名前の行が複数ある・名前と完全一致する行が
+        無く部分一致のみ (グループ名等の可能性) で特定できない /
+        ヘッダが完全一致しない場合は、何も登録せず停止する。戻り値:
+        (ok, learned_entries)。失敗理由は self.relearn_error に残す。
+        """
+        name = str(name).strip()
+        target = norm(name)
+        frame, items = self.capture_ocr()
+        if frame is None:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "画面を撮影できず、トーク一覧を探せなかった",
+                }
+            )
+            self.relearn_error = "recipient_search_failed"
+            return False, []
+        cands = self.find_talk_candidates(name, frame, items)
+        if not cands:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' が見つからない" % name,
+                }
+            )
+            self.careful_capture("recipient-not-found")
+            self.relearn_error = "recipient_not_found"
+            return False, []
+        if len(cands) > 1:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' と読める行が %d 件あり特定できない"
+                    " (同名・グループ等の可能性。何も登録せず停止)"
+                    % (name, len(cands)),
+                }
+            )
+            self.careful_capture("recipient-ambiguous")
+            self.relearn_error = "recipient_ambiguous"
+            return False, []
+        if norm(cands[0][2]) != target:
+            # 完全一致の行が無く、名前を含むだけの行が 1 件だけある。
+            # より長い名前の一部か、グループ名 (「○○と他2名」等) の
+            # 可能性があり特定できないため、曖昧として登録せず停止する。
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' と完全一致する行がなく、"
+                    "部分一致のみ (%s)。グループ等の可能性があるため"
+                    "特定できず、何も登録せず停止" % (name, cands[0][2]),
+                }
+            )
+            self.careful_capture("recipient-ambiguous")
+            self.relearn_error = "recipient_ambiguous"
+            return False, []
+        x, y, _row_text = cands[0]
+        self.checks.append(
+            {
+                "name": "recipient_search",
+                "ok": True,
+                "evidence": "トーク一覧で '%s' の行の座標を再取得 (%d, %d)"
+                % (name, x, y),
+            }
+        )
+        if not self.click_point((x, y)):
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク行 (%d, %d) をクリックできなかった" % (x, y),
+                }
+            )
+            self.relearn_error = "recipient_search_failed"
+            return False, []
+        _frame2, items2 = self.capture_ocr()
+        header_limit = float(self.tunables["relearn_header_max_y"])
+        # ヘッダ確認は、開いたトーク側の領域 (トーク一覧より右) に
+        # 限定する。一覧は開いた後も左に残るため、帯の縦範囲だけで
+        # 見ると一覧側の名前で合格してしまう。判定は行の中の連続した
+        # 文字列単位で、完全一致を必須にする (部分一致ではグループ
+        # トーク等を本人と取り違えるため)。
+        fw2 = (_frame2 or frame)[2]
+        header_min_cx = fw2 * float(self.tunables["talk_list_width_ratio"])
+        header_items = [
+            it
+            for it in items2
+            if it["y"] < header_limit
+            and it["x"] + it["w"] / 2 > header_min_cx
+            and norm(it["text"])
+        ]
+        header_hit = None
+        for _point, text in self._text_runs(header_items):
+            if norm(text) == target:
+                header_hit = text
+                break
+        if header_hit is None:
+            self.checks.append(
+                {
+                    "name": "recipient_header",
+                    "ok": False,
+                    "evidence": "開いた先のヘッダに '%s' が見当たらない"
+                    " (何も登録せず停止)" % name,
+                }
+            )
+            self.careful_capture("recipient-header-mismatch")
+            self.relearn_error = "recipient_header_mismatch"
+            return False, []
+        self.checks.append(
+            {
+                "name": "recipient_header",
+                "ok": True,
+                "evidence": "開いた先のヘッダで宛名 '%s' を確認" % header_hit,
+            }
+        )
+        # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
+        aliases = [name]
+        header_name = header_hit.strip()
+        if header_name and header_name not in aliases:
+            aliases.append(header_name)
+        entry = {"aliases": aliases, "nav_click": [x, y]}
+        old_recips, old_default = recipients_of(self.app_cfg)
+        recips = dict(old_recips)
+        recips[name] = entry
+        self.app_cfg["recipients"] = recips
+        if not self.app_cfg.get("default_recipient") and old_default:
+            self.app_cfg["default_recipient"] = old_default
+        backup = save_config(self.cfg)
+        append_learned_case(
+            {
+                "at": datetime.now(JST).isoformat(),
+                "app": self.app,
+                "item": "recipient:" + name,
+                "old": None,
+                "new": entry,
+                "reason": "再学習フローで座標を再取得して登録",
+            }
+        )
+        self.recipient_id = name
+        self.recipient_known = True
+        self.acfg = effective_acfg(self.app_cfg, entry)
+        self.acfg["recipient_id"] = name
+        self.checks.append(
+            {
+                "name": "config_saved",
+                "ok": True,
+                "evidence": "宛先 '%s' を辞書へ登録 (nav_click=%s / aliases=%s。"
+                "バックアップ: %s)" % (name, [x, y], aliases, os.path.basename(backup)),
+            }
+        )
+        learned = [
+            {
+                "item": "recipient",
+                "old": None,
+                "new": {"id": name, "aliases": aliases, "nav_click": [x, y]},
+                "reason": "再学習フローで座標を再取得して登録",
+            }
+        ]
+        return True, learned
+
+    def careful(self, to_name=None):
         """慎重モード本体。戻り値: (ok, learned, self_check_ok)。
+
+        to_name に辞書に無い宛先が指定されていたら、先に再学習フロー
+        (座標の再取得 → 辞書への変数登録) を行い、登録できたら通常の
+        慎重モード本体 (座標の探索・保存・自己確認) へ進む。登録
+        できなければ何も登録せず停止する。
+        """
+        learned = []
+        if to_name and not self.recipient_known:
+            ok_rel, entries = self.relearn_recipient(to_name)
+            learned.extend(entries)
+            if not ok_rel:
+                return False, learned, False
+        body_ok, body_learned, self_check_ok = self._careful_body()
+        learned.extend(body_learned)
+        return body_ok, learned, self_check_ok
+
+    def _careful_body(self):
+        """慎重モード本体 (座標の探索と学習)。戻り値は careful と同じ。
 
         learned は {"item", "old", "new", "reason"} のリスト。学習した値は
         config.local.json へ保存 (バックアップ + 学習記録の追記) し、
@@ -2005,6 +2415,9 @@ class Runner:
         if learned:
             for entry in learned:
                 self.acfg[entry["item"]] = entry["new"]
+                # 実効設定 (self.acfg) はコピーなので、保存対象の実体
+                # (アプリ設定) にも同じ値を書く
+                self.app_cfg[entry["item"]] = entry["new"]
             backup = save_config(self.cfg)
             now_iso = datetime.now(JST).isoformat()
             for entry in learned:
@@ -2090,6 +2503,11 @@ def main():
     ap.add_argument("--text-file")
     ap.add_argument("--mode", choices=["field", "bubble"], default="field")
     ap.add_argument(
+        "--to",
+        help="宛先 (config の recipients 辞書の ID または名前)。"
+        "未指定なら default_recipient",
+    )
+    ap.add_argument(
         "--expires",
         help="approve の有効期限 (ISO8601。オフセット無しは JST とみなす)",
     )
@@ -2101,14 +2519,35 @@ def main():
     # approve は Mac に接続しない (承認記録を作るだけ)。
     if args.action == "approve":
         text = read_text(args)
+        rid, entry = find_recipient(cfg["apps"][args.app], args.to)
+        if entry is None:
+            # 辞書に無い宛先には承認を作らない (まず careful --to で
+            # 座標を再取得して登録してから承認する)
+            out = {
+                "ok": False,
+                "app": args.app,
+                "action": "approve",
+                "recipient": None,
+                "total_sec": round(time.time() - t0, 2),
+                "recipient_requested": args.to,
+                "error": "unknown_recipient",
+            }
+            print(json.dumps(out, ensure_ascii=False, indent=2))
+            sys.exit(2)
         ttl = timedelta(hours=float(tunables(cfg)["approval_ttl_hours"]))
         rec = create_approval(
-            args.app, cfg["apps"][args.app], text, expires=args.expires, ttl=ttl
+            args.app,
+            effective_acfg(cfg["apps"][args.app], entry),
+            text,
+            expires=args.expires,
+            ttl=ttl,
         )
         out = {
             "ok": True,
             "app": args.app,
             "action": "approve",
+            "recipient": rid,
+            "recipient_requested": args.to,
             "total_sec": round(time.time() - t0, 2),
             "approval": {
                 "id": rec["text_sha256"][:12],
@@ -2124,14 +2563,29 @@ def main():
         print(json.dumps(out, ensure_ascii=False, indent=2))
         sys.exit(0)
 
-    r = Runner(cfg, args.app)
+    r = Runner(cfg, args.app, to=args.to)
     ok = True
     error = None
     retry_info = None
     learned = None
     self_check = None
     try:
-        if not r.connect():
+        if r.to_name and not r.recipient_known and args.action != "careful":
+            # 辞書に無い宛先は正常系に乗らない。座標の再取得と登録は
+            # careful の再学習フローで行うため、ここでは Mac に触らず
+            # 停止する (careful --to <宛先> を先に呼ぶのが手順)。
+            ok = False
+            error = "unknown_recipient"
+            r.checks.append(
+                {
+                    "name": "recipient_resolution",
+                    "ok": False,
+                    "evidence": "宛先 '%s' は辞書に無い "
+                    "(careful --to '%s' で座標を再取得して登録してから送る)"
+                    % (r.to_name, r.to_name),
+                }
+            )
+        elif not r.connect():
             ok = False
             error = "connect_failed"
         elif args.action == "input":
@@ -2140,11 +2594,19 @@ def main():
             ok = r.verify(read_text(args), args.mode)
         elif args.action == "careful":
             # 慎重モード: 学習の経路。送信キーは絶対に押さない。
-            ok, learned, self_check_ok = r.careful()
+            # 辞書に無い宛先が --to で指定されていたら、先に再学習
+            # フロー (座標の再取得 → 辞書への登録) に入る。
+            ok, learned, self_check_ok = r.careful(to_name=r.to_name)
             self_check = {"ok": self_check_ok}
             if not ok and error is None:
-                # 覆いを解消できずに停止した場合は理由を分けて報告する
-                error = "overlay_unresolved" if r.overlay_blocked else "careful_failed"
+                if r.relearn_error:
+                    # 再学習で登録できなかった理由をそのまま報告する
+                    error = r.relearn_error
+                elif r.overlay_blocked:
+                    # 覆いを解消できずに停止した場合は理由を分けて報告する
+                    error = "overlay_unresolved"
+                else:
+                    error = "careful_failed"
         elif args.action == "send":
             # 承認ゲート: 欄の文面を読み戻し、その文面の承認があるときだけ送る。
             field_text = r.readback_field()
@@ -2212,6 +2674,8 @@ def main():
         "ok": ok,
         "app": args.app,
         "action": args.action,
+        "recipient": r.recipient_id,
+        "recipient_requested": r.to_name,
         "total_sec": round(time.time() - t0, 2),
         "steps": r.steps,
         "checks": r.checks,
