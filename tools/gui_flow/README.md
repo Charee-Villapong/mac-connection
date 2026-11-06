@@ -157,7 +157,8 @@ python3 gui_flow.py discord careful
 | `leak_threshold` | 0.5 | 送信後検閲で「欄に本文が残っている」とみなす一致度 |
 | `talk_list_width_ratio` | 0.32 | トーク一覧とみなす横範囲（窓幅比）。再学習では一覧／ヘッダ領域の境界、verify/post ではヘッダ帯切り出しの左端として共有。`apps.<app>` の同名キーでアプリ別に上書き可（一覧の幅はアプリのレイアウト依存。例: LINE は 0.27、Discord も 0.27＝1440pt 窓で切り出し左端が約 389pt となり、ヘッダ名の開始位置より左に収まる） |
 | `header_candidate_expansion`（`apps.<app>` 直下） | 無効（キー無し） | 真のアプリでのみ、ヘッダ宛先判定の候補を run 群に加えて OCR 項目と空白区切り第 1 トークンへ拡張する。Discord のみ `true`（`config.example.json` 参照） |
-| `relearn_header_max_y` | 260 | 「ヘッダ」とみなす縦範囲（窓相対 px）。再学習ではヘッダ領域の上限、verify/post では切り出し帯の高さ（窓フレーム高で換算）として**共有**するキー（verify/post 用の新規キーは作らない） |
+| `relearn_header_max_y` | 260 | 「ヘッダ」とみなす縦範囲（窓相対 px）。再学習ではヘッダ領域の上限、verify/post では切り出し帯の高さ（窓フレーム高で換算）のフォールバックとして使うキー（verify/post の切り出し高さは `header_verify_crop_max_y` で個別に上書き可） |
+| `header_verify_crop_max_y`（`apps.<app>` 直下 / `tunables` どちらでも可） | 無し（未設定なら従来通り `relearn_header_max_y` の解決結果） | verify / post のヘッダ帯切り出しの高さ（窓相対 pt、窓フレーム高で換算）だけを上書きするキー。解決順は `apps.<app>` の同キー → `tunables` の同キー → `apps.<app>` の `relearn_header_max_y` → `tunables` の同キー → 既定 260 の順で最優先。再学習のヘッダ領域には影響しない。LINE では宛先名が窓上端から約 50–75pt にあり、100pt の帯ならメッセージ欄を含まないため、複数行の入力でメッセージ欄がずれても名前の読みがぶれない（`config.example.json` の line 節で 100 を例示） |
 | `relearn_header_prefix_max_extra` | 2 | ヘッダ確認で前方一致を許す余りの最大文字数。**再学習と verify/post のヘッダ確認で共有**するキー（verify/post 用の新規キーは作らない） |
 | `talk_row_merge_px` | 12 | 行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px）。再学習と verify/post のヘッダ確認の run 化で共有 |
 | `nav_scrutiny_row_tolerance_px` | 36 | nav 精査で、保存済み `nav_click` と宛先本人の行を「同じ行」とみなす縦座標差の許容差（px）。行間隔（約 72px）の半分で、隣の行は別人の行として検出できる値 |

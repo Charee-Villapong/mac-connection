@@ -1040,10 +1040,12 @@ def build_verify_script(name, app, acfg, tun=None):
     sips で切り出し、その切り出し画像だけを ocr.swift で読む。切り出し
     範囲は現行のヘッダ領域定義の読み替えで、x は PNG 幅 ×
     talk_list_width_ratio から右、y は窓高さに対する
-    relearn_header_max_y 分 (窓相対 pt) の帯。ratio は acfg の
-    talk_list_width_ratio 優先 (無ければ tun)、max_y は tun 基準で
-    acfg に同名キーがあればそちらを拾う (run_verify_checks と同じ
-    解決順 + acfg 上書き)。数値はスクリプト本文にリテラルで現れる。
+    header_verify_crop_max_y (無ければ relearn_header_max_y) 分
+    (窓相対 pt) の帯。ratio は acfg の talk_list_width_ratio 優先
+    (無ければ tun)、max_y の解決順は acfg の
+    header_verify_crop_max_y → tun の同キー → acfg の
+    relearn_header_max_y → tun の同キー → 既定値の順。
+    数値はスクリプト本文にリテラルで現れる。
     算出入力が不正なら切り出しをスキップし、-header-ocr.txt は
     空のままにする (fail-safe: 呼び出し側は UNREADABLE として扱う)。
     """
@@ -1054,7 +1056,11 @@ def build_verify_script(name, app, acfg, tun=None):
         ratio_v = tun.get(
             "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
         )
-    max_y_v = (acfg or {}).get("relearn_header_max_y")
+    max_y_v = (acfg or {}).get("header_verify_crop_max_y")
+    if max_y_v is None:
+        max_y_v = tun.get("header_verify_crop_max_y")
+    if max_y_v is None:
+        max_y_v = (acfg or {}).get("relearn_header_max_y")
     if max_y_v is None:
         max_y_v = tun.get(
             "relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"]
