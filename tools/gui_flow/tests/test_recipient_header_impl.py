@@ -14,37 +14,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
+from impl_fixtures import make_full_cfg  # noqa: E402
+
 FRAME = (0, 30, 1440, 870)
 
-CFG = {
-    "ssh": {
-        "user": "test-user",
-        "host": "192.0.2.1",
-        "identity": "/tmp/id_test",
-        "proxy_script": "/tmp/proxy.sh",
-        "control_path": "/tmp/gf-test-ctl",
-    },
-    "apps": {
-        "discord": {
-            "app_name": "Discord",
-            "window_app": "Discord",
-            "process": "Discord",
-            "input_click": [700, 852],
-            "nav_click": [174, 350],
-            "recipient_aliases": ["example-dm"],
-            "header_band": 110,
-        },
-        "line": {
-            "app_name": "LINE",
-            "window_app": "LINE",
-            "process": "LINE",
-            "input_click": [800, 780],
-            "nav_click": [210, 160],
-            "recipient_aliases": ["example-talk"],
-            "header_band": 110,
-        },
-    },
-}
+CFG = make_full_cfg()
 
 
 def item(x, y, text, w=200, h=20):

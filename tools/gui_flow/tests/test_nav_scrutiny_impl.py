@@ -15,37 +15,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
+from impl_fixtures import make_cfg_nav_scrutiny as make_cfg  # noqa: E402
+
 FRAME = (0, 30, 1440, 850)
 
-SSH_CFG = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
 
 
-def make_cfg(app, saved_nav, ratio):
-    return {
-        "ssh": dict(SSH_CFG),
-        "apps": {
-            app: {
-                "app_name": app,
-                "window_app": app,
-                "process": app,
-                "input_click": [700, 800],
-                "talk_list_width_ratio": ratio,
-                "default_recipient": "hanako",
-                "recipients": {
-                    "hanako": {
-                        "aliases": ["テスト花子"],
-                        "nav_click": list(saved_nav),
-                    }
-                },
-            }
-        },
-    }
 
 
 def item(text, center_y, x=100, w=120):

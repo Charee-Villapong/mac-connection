@@ -16,28 +16,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
+from impl_fixtures import make_line_app  # noqa: E402
+from impl_fixtures import make_ssh  # noqa: E402
 
-LINE_APP = {
-    "app_name": "LINE",
-    "window_app": "LINE",
-    "process": "LINE",
-    "input_click": [800, 780],
-    "header_band": 110,
-    "default_recipient": "example-default",
-    "recipients": {
-        "example-default": {
-            "aliases": ["example-default", "example-alias"],
-            "nav_click": [100, 120],
-        }
-    },
-}
+DUMMY_SSH = make_ssh()
+
+LINE_APP = make_line_app()
 
 FRAME = (0, 30, 1420, 850)
 

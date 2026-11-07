@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
+from impl_fixtures import make_discord_cfg  # noqa: E402
+from impl_fixtures import make_full_cfg  # noqa: E402
+from impl_fixtures import make_line_cfg  # noqa: E402
+
 DISCORD_TEXT = """```
 [SYSTEM] AIエージェントからお知らせ
 これはテストです。
@@ -28,24 +32,8 @@ LINE_TEXT = """【AIエージェントからのお知らせ】
 送信はしません。
 確認が終わったら消します。"""
 
-DISCORD_CFG = {
-    "app_name": "Discord",
-    "window_app": "Discord",
-    "process": "Discord",
-    "input_click": [700, 852],
-    "nav_click": [174, 350],
-    "recipient_aliases": ["example-dm"],
-    "header_band": 110,
-}
-LINE_CFG = {
-    "app_name": "LINE",
-    "window_app": "LINE",
-    "process": "LINE",
-    "input_click": [800, 780],
-    "nav_click": [210, 160],
-    "recipient_aliases": ["example-talk"],
-    "header_band": 110,
-}
+DISCORD_CFG = make_discord_cfg()
+LINE_CFG = make_line_cfg()
 WIN = (767, 0, 30, 1440, 870)
 
 
@@ -264,16 +252,7 @@ def test_build_scripts_line():
 
 # --- Mac 通信 (モック) --------------------------------------------------------------
 
-DUMMY_SSH_CFG = {
-    "ssh": {
-        "user": "test-user",
-        "host": "192.0.2.1",
-        "identity": "/tmp/id_test",
-        "proxy_script": "/tmp/proxy.sh",
-        "control_path": "/tmp/gf-test-ctl",
-    },
-    "apps": {"discord": DISCORD_CFG, "line": LINE_CFG},
-}
+DUMMY_SSH_CFG = make_full_cfg()
 
 
 def test_run_queue_parses_result_and_files(monkeypatch):

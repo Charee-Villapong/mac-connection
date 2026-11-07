@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from impl_fixtures import make_cfg_header_multi as make_cfg  # noqa: E402
+
 WIN = (767, 0, 30, 1440, 870)
 FRAME = WIN[1:]
 
@@ -42,13 +44,6 @@ DISCORD_BODY_LINES = [
     "返信は不要です。",
 ]
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
 
 
 def ocr_line(x, y, w, h, text):
@@ -59,38 +54,6 @@ def header_ocr_line(text, y=60, x=500):
     return ocr_line(x, y, 200, 30, text)
 
 
-def make_cfg(tunables=None):
-    recipients = {
-        TARGET: {"aliases": [TARGET, "花子"], "nav_click": [210, 160]},
-        OTHER: {"aliases": [OTHER, "太郎"], "nav_click": [210, 232]},
-        OTHER_2: {"aliases": [OTHER_2, "次郎"], "nav_click": [210, 304]},
-    }
-    cfg = {
-        "ssh": dict(DUMMY_SSH),
-        "apps": {
-            "line": {
-                "app_name": "LINE",
-                "window_app": "LINE",
-                "process": "LINE",
-                "input_click": [800, 780],
-                "header_band": 110,
-                "default_recipient": TARGET,
-                "recipients": recipients,
-            },
-            "discord": {
-                "app_name": "Discord",
-                "window_app": "Discord",
-                "process": "Discord",
-                "input_click": [700, 852],
-                "header_band": 110,
-                "default_recipient": TARGET,
-                "recipients": recipients,
-            },
-        },
-    }
-    if tunables:
-        cfg["tunables"] = tunables
-    return cfg
 
 
 def make_header_runner(monkeypatch, header_sequence, tunables=None, sleeps=None):

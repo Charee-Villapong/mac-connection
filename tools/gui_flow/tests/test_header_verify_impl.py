@@ -23,10 +23,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
-GUI_FLOW_DIR = Path(__file__).resolve().parents[1]
-EXAMPLE = json.loads(
-    (GUI_FLOW_DIR / "config.example.json").read_text(encoding="utf-8")
-)
+from impl_fixtures import load_example  # noqa: E402
+from impl_fixtures import make_cfg_example_based_discord_only as make_cfg  # noqa: E402
+
+EXAMPLE = load_example()
 
 TARGET = "てすとch"
 ACTIVITY = "SampleGameおもろ"
@@ -51,14 +51,6 @@ DISCORD_BODY_LINES = [
     "返信は不要です。",
 ]
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
-
 
 def ocr_line(x, y, w, h, text):
     return f"TEXT [x={x} y={y} w={w} h={h} conf=1.00] {text}"
@@ -68,21 +60,6 @@ def header_ocr_line(text, y=60, x=500):
     return ocr_line(x, y, 200, 30, text)
 
 
-def make_cfg():
-    cfg = {
-        "ssh": dict(DUMMY_SSH),
-        "tunables": copy.deepcopy(EXAMPLE.get("tunables", {})),
-        "apps": {
-            "discord": copy.deepcopy(EXAMPLE["apps"]["discord"]),
-            "line": copy.deepcopy(EXAMPLE["apps"]["line"]),
-        },
-    }
-    cfg["apps"]["discord"]["recipients"] = {
-        TARGET: {"aliases": [TARGET], "nav_click": [174, 350]},
-        OTHER: {"aliases": [OTHER], "nav_click": [210, 232]},
-    }
-    cfg["apps"]["discord"]["default_recipient"] = TARGET
-    return cfg
 
 
 def discord_ocr(header):
