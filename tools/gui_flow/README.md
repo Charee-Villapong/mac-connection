@@ -125,7 +125,9 @@ python3 gui_flow.py discord careful
 3. **学習の保存**: 正解座標（`input_click`）とフレーム（`learned_frame`）を `config.local.json` へ書き込みます。書き込み前に `config.local.json.bak-<日時>` のバックアップを取り、学習記録を `tools/gui_flow/learned_cases.jsonl`（git 管理外）へ 1 行ずつ追記します（日時・アプリ・項目・旧値・新値・理由）。
 4. **自己確認**: 固定文（設定で変更可能）で「入力 → 検閲 → 空に戻す」を実行し、正常系に戻ったことを証明します。結果 JSON には `learned`（旧値→新値）、`self_check`（合否）、`screenshot`（代表キャプチャのパス）が入ります。
 
-**高速パスからの接続**: `post` / `input` / `send` の停止理由が座標・形状の疑い（検閲の座標系チェック＝欄の状態・本文照合・読み戻しだけが落ちた／入力しても欄が空のまま／ウィンドウフレームが学習値から許容差超でずれた）の場合、結果 JSON の `error` は `needs_calibration` になり、`checks` の `calibration` 項目に疑いの内容が残ります。これが careful を呼ぶ合図です。宛先違い・欄の残り・構造エラーは学習対象にせず、従来通り人の慎重プロセスへ回します。
+**高速パスからの接続**: `post` / `input` / `send` の停止理由が座標・形状の疑い（検閲の座標系チェック＝欄の状態・本文照合・読み戻しだけが落ちた／入力しても欄が空のまま／ウィンドウフレームが学習値から許容差超でずれた）の場合、結果 JSON の `error` は `needs_calibration` になり、`checks` の `calibration` 項目に疑いの内容が残ります。これが careful を呼ぶ合図です。宛先違い・欄の残り・構造エラーは学習対象にせず、従来通り人の慎重プロセスへ回します。ただし `post` で失敗が `fail_readback_empty` のみで、ウィンドウフレームが学習値と一致している場合は座標ズレではなくアプリ無応答の疑いとして `error=app_unresponsive_suspect` になり、アプリの再起動を推奨します（`needs_calibration` にはしません）。
+
+なお、`ad_flow`（agent-desktop 版）は読み取り専用で、その `post` は封鎖されています。送信は gui_flow 一本です。
 
 ### 未知の宛先の再学習フロー（`careful --to <宛先>`）
 
