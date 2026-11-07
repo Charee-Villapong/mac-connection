@@ -49,6 +49,38 @@ python3 gui_flow.py line    careful --to 新しい宛先の名前
 
 結果は標準出力に JSON で返ります（合否・チェック内訳・各ステップの所要秒数・送信成功時はスクショの保存先パス）。終了コードは 0 = 全チェック合格、2 = 異常検知または失敗です。結果 JSON には `recipient`（解決された宛先 ID）と `recipient_requested`（`--to` の指定そのまま）が入ります。
 
+## 結果JSONの `error` 一覧
+
+結果 JSON トップレベルの `error` に入りうる固定コードは 25 種です。成功時は `null` です。汎用例外時は、固定コードではなく例外型名とメッセージを組み合わせた文字列（例: `ExceptionType: message` 形式）が入る場合があります。また、`input` / `verify` / `clear` / `test` の単独失敗では `error` が `null` のままの場合があり、その場合は `checks` を見て失敗箇所を確認します。
+
+| コード | 出る段階 | 条件 |
+|---|---|---|
+| `unknown_recipient` | `main`（`approve` と、`careful` 以外の全アクションの開始時） | `--to` で指定した宛先が `recipients` 辞書に無い（`approve` では承認記録を作らず、他のアクションでは Mac に触らず停止する） |
+| `connect_failed` | `main`（接続確認） | Mac への接続確認に失敗した |
+| `approval_missing` | `main`（`post` / `send` の承認ゲート） | 承認記録が無い／期限切れ／使用済み等で承認ゲートを通らなかった（`post` は入力前、`send` は欄の文面に対する承認が無い場合） |
+| `field_readback_failed` | `main`（`send`） | 入力欄の文面を読み戻せなかった |
+| `overlay_unresolved` | `main`（`careful`） | 覆いの汎用解消を試みても解消できずに停止した |
+| `careful_failed` | `main`（`careful`） | 再学習・覆い解消以外の理由で `careful` が失敗した |
+| `timeout` | `main`（全アクション共通） | SSH／キュー等の処理がタイムアウトした |
+| `needs_calibration` | `main`（`post` / `input` / `send`） | 停止理由が座標・形状の疑い（座標系チェックのみ不合格／入力しても欄が空のまま／ウィンドウフレームが学習値から許容差超でずれた）の場合に、元の `error` から差し替わる |
+| `nav_scrutiny_failed` | `post`（nav 精査） | 精査が理由コードなしで失敗した場合のフォールバック（現行Runnerでは通常発生しない） |
+| `nav_scrutiny_unreadable` | `post`（nav 精査） | トーク一覧の撮影・OCRができなかった（ホーム遷移後の再撮影・再OCRができなかった場合を含む） |
+| `nav_home_click_failed` | `post`（nav 精査のホーム救済） | 候補 0 件で `home_click` 設定がある場合に、ホームボタンのクリックに失敗した |
+| `nav_recipient_not_found` | `post`（nav 精査） | トーク一覧に宛先と完全一致する行が 0 件だった（ホーム救済の再探索でも 0 件だった場合と、`home_click` 未設定で直ちに停止する場合を含む） |
+| `nav_recipient_ambiguous` | `post`（nav 精査） | トーク一覧に宛先と完全一致する行が 2 件以上あり特定できなかった |
+| `nav_scrutiny_click_failed` | `post`（nav 精査） | 候補が 1 件だが保存座標と違う行で、その行への修正クリックに失敗した |
+| `wrong_recipient` | `post`（入力前のヘッダ確認／送信前検閲） | ヘッダの宛名が想定宛先と不一致だった（別人の宛名が読めた場合） |
+| `recipient_header_unreadable` | `post`（入力前のヘッダ確認／送信前検閲） | ヘッダ確認の撮影・OCRが全回できず、宛名を確認できなかった（`nav_click` のクリック失敗を含む） |
+| `pre_send_failed_stop` | `post`（送信前検閲） | 送信前検閲が、リトライ対象外の理由で失敗した（宛先系の失敗を除く） |
+| `pre_send_failed_retry_exhausted` | `post`（送信前検閲の高速リトライ） | 本文不一致のリトライが上限（`max_pre_send_retries`）まで達しても合格しなかった |
+| `retry_clear_failed` | `post`（高速リトライ） | リトライ時の入力欄の全消去（`clear`）に失敗した |
+| `send_failed` | `post`（送信） | 送信キーの送信処理に失敗した |
+| `post_send_verify_failed` | `post`（送信後検閲） | 送信後の吹き出し検閲が不合格だった |
+| `recipient_search_failed` | `careful` の再学習フロー | 画面を撮影できずトーク一覧を探せなかった、または特定した行のクリックに失敗した |
+| `recipient_not_found` | `careful` の再学習フロー | トーク一覧に指定名の行が見つからなかった |
+| `recipient_ambiguous` | `careful` の再学習フロー | 同じ名前の行が複数ある、または完全一致する行が無く部分一致しかなく特定できなかった |
+| `recipient_header_mismatch` | `careful` の再学習フロー | 開いた先のヘッダが完全一致も前方一致（余り上限以内）もしない |
+
 ## 宛先の変数化（recipients 辞書と `--to`）
 
 宛先はコードではなく config の変数として持ちます。アプリごとに `recipients` 辞書（キー = 宛先 ID、値 = その宛先固有の値だけ）と `default_recipient` を持ちます。
@@ -99,7 +131,7 @@ verify の 1 行目チェックもこの区別で実装しています。
 - **送信後スクショの受け渡し（`post` / `send`）**: 送信が成功したら、送信後検閲で撮影したキャプチャが VM 側の `~/workspace/mac-shots/gui-flow-<app>-<YYYYMMDD-HHMMSS>.png`（JST）に保存され、結果 JSON の `screenshot` フィールドにその絶対パスが入ります。エージェントはこのパスを開いてチャットで提示するだけです（Mac 側の作業フォルダから最新キャプチャを探す手順は不要になりました）。送信しなかった場合（承認ゲート停止・検閲 NG 等）は `screenshot` は `null` です。取得・保存に失敗した場合も送信自体は成功として扱い、`screenshot` は `null` で、理由が `checks` の `screenshot` 項目に残ります。
 - 異常（宛先不一致 / 入力欄に残りあり / ウィンドウが見つからない / 画面が読めないなど）を検知したら、**送信せずに停止**し、結果 JSON で報告します。
 - **宛先確認はヘッダ帯の切り出し OCR 専用（LINE / Discord 共通）**: verify / post の宛先判定（`Runner.verify` の `recipient` チェックと `Runner.check_recipient_header()`）は、撮影 PNG 全体の OCR からヘッダ領域を座標で拾う方式ではなく、撮影 PNG からヘッダ帯だけを切り出して OCR した文字列だけで判定します。切り出しは Mac 側スクリプトが `sips` で行い（`-header.png` → `-header-ocr.txt`）、範囲は従来のヘッダ領域定義の読み替えで、左端が PNG 幅 × `talk_list_width_ratio`、高さが `relearn_header_max_y` を窓フレーム高で換算した帯です。判定は切り出し文字列を行単位の run にまとめ、完全一致（exact）、または余り `relearn_header_prefix_max_extra` 文字以内の前方一致（prefix）で行います。アプリ別キー `header_candidate_expansion` が真のアプリ（例: Discord）では、判定に渡す候補を「従来の run 群 + 各 OCR 項目そのもの + 各 run／項目の空白区切りの第 1 トークン」へ拡張します（ヘッダ名がアクティビティ表示と連結して読まれるケースへの対応。判定規則と余り上限は従来通りで、証跡に残るヘッダ文字列は実際の OCR run のままです）。このキーが無い／偽のアプリ（LINE を含む）では候補は従来の run 群のまま変わりません。全体 OCR 側（トーク一覧など）に宛先名が写っていても合格しません。切り出し OCR に文字列が無い・取得できない場合も不合格（確認できず）です。チェック結果には方式・余りと、切り出しで実際に読めた run 文字列（`actual_header`）が残ります。本文照合・読み戻し等の他のチェックは従来通り全体 OCR で行います。再学習フロー（`relearn_recipient`）のヘッダ確認は、この切り出しOCR方式の対象外です（従来通り全体OCRに対する座標スコープ（`header_region_runs`）で判定します）。ただし一致規則は対象外ではありません。再学習側も同じく、完全一致（exact）、または余り `relearn_header_prefix_max_extra` 文字以内の前方一致（prefix）で判定し、このキーを verify/post と共有します。verify/post との違いは、ヘッダ文字列の取得方式だけです。
-- **ナビゲーション前の座標精査（`post`）**: `post` はヘッダ確認の前に `Runner.scrutinize_nav()` で、保存済み `nav_click` が宛先本人の行を指しているかをトーク一覧の OCR で精査します。一覧から宛先エイリアスと**完全一致**する行を探し（部分一致のみは候補にしません。再学習の一覧探索と同じ規則）、候補が 0 件なら `error=nav_recipient_not_found`、2 件以上なら `error=nav_recipient_ambiguous`、撮影・OCR ができなければ `error=nav_scrutiny_unreadable` で、クリックも設定変更もせず停止します。候補が 1 件で保存座標と同じ行（縦座標差が `nav_scrutiny_row_tolerance_px` 以内）なら通過します。候補が 1 件だが保存座標と違う行（＝並び替え等で保存座標が別人の行を指している）なら、その行をクリックして開き、`recipients` 辞書の `nav_click` を候補座標へ更新して保存します（書き込み前にバックアップ、学習記録へ追記。再学習の登録と同じ作法）。修正クリックに失敗した場合は `error=nav_scrutiny_click_failed` で停止します。`nav_click` 未設定で候補が 1 件なら、それを正として通過します。精査は文字入力・送信キーを絶対に行いません（行を開くクリックのみ）。この精査は Runner 共通経路で、一覧の幅比率はアプリ別に解決されるため、LINE / Discord の両方に効きます。
+- **ナビゲーション前の座標精査（`post`）**: `post` はヘッダ確認の前に `Runner.scrutinize_nav()` で、保存済み `nav_click` が宛先本人の行を指しているかをトーク一覧の OCR で精査します。一覧から宛先エイリアスと**完全一致**する行を探し（部分一致のみは候補にしません。再学習の一覧探索と同じ規則）、候補が 0 件なら、ホーム救済を行います: `home_click` 設定がある場合のみ、ホームボタンへ1回だけ遷移して再探索します（ホームクリックに失敗した場合は `error=nav_home_click_failed`、遷移後の撮影・OCRができなければ `error=nav_scrutiny_unreadable` で停止します）。再探索でも候補が無ければ `error=nav_recipient_not_found` で停止し、`home_click` 未設定なら直ちに `error=nav_recipient_not_found` で停止します。候補が 2 件以上なら `error=nav_recipient_ambiguous`、撮影・OCR ができなければ `error=nav_scrutiny_unreadable` で、設定変更はせず停止します。候補が 1 件で保存座標と同じ行（縦座標差が `nav_scrutiny_row_tolerance_px` 以内）なら通過します。候補が 1 件だが保存座標と違う行（＝並び替え等で保存座標が別人の行を指している）なら、その行をクリックして開き、`recipients` 辞書の `nav_click` を候補座標へ更新して保存します（書き込み前にバックアップ、学習記録へ追記。再学習の登録と同じ作法）。修正クリックに失敗した場合は `error=nav_scrutiny_click_failed` で停止します。`nav_click` 未設定で候補が 1 件なら、それを正として通過します。精査は文字入力・送信キーを絶対に行いません（行を開くクリックのみ）。この精査は Runner 共通経路で、一覧の幅比率はアプリ別に解決されるため、LINE / Discord の両方に効きます。
 - **入力前のヘッダ確認（`post`）**: `post` は入力を始める前に `Runner.check_recipient_header()` でヘッダだけを確認します（`nav_click` があればその行を開いてから、各回の撮影ごとに `Runner.capture_header_runs()` でヘッダ帯の切り出し OCR を取得して判定）。ここで不一致なら `error=wrong_recipient`、撮影自体ができなければ `error=recipient_header_unreadable` で停止し、入力・送信・後片付けは一切しません（まだ何も入力していないため消すものはありません。結果 JSON の `wrong_recipient.cleaned` は `false`）。送信前検閲で宛先違いが分かった場合（入力済み）の後片付けは従来通りです。
 - `post` は送信前検閲（入力の読み戻し照合 + 欄の OCR 照合）の全チェックが合格したときだけ送信キーに進みます。
 - **高速リトライ（`post` のみ）**: 送信前検閲が「本文の不一致」（読み戻し不一致・行単位照合 NG など）だけで落ちた場合は、慎重プロセスへ落とす前に、プログラム内で自動リトライします。手順は「入力欄を全消去（消すのはこの run で自分が入力した分だけ）→ 同じ文面を再入力 → 再検閲」で、最大 2 回までです。合格すればそのまま送信へ進み、2 回とも NG なら停止して報告します。リトライ 1 回の追加時間は実測で Discord 約 25 秒 / LINE 約 22 秒です。
