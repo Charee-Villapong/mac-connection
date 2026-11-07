@@ -55,7 +55,11 @@
         }
       },
       "talk_list_width_ratio": 0.27,
-      "window_app": "Discord"
+      "window_app": "Discord",
+      "home_click": [
+        36,
+        83
+      ]
     },
     "line": {
       "app_name": "LINE",
