@@ -181,6 +181,38 @@ def tunables(cfg):
     return t
 
 
+# --- ヘッダ関連の設定解決 (共有ヘルパー) ---------------------------------------
+# talk_list_width_ratio と relearn_header_prefix_max_extra の解決は
+# 経路ごとに重複実装されていたため、ここへ寄せる。経路ごとの解決元・
+# 優先順位・既定値は現行どおりに保存する (勝手に揃えない):
+# - talk_list_width_ratio: アプリ別 (acfg / app_cfg) > tun > 既定 0.32
+# - relearn_header_prefix_max_extra: tun のみ > 既定 2。
+#   run_verify_checks では acfg 直下の同名キーは現行でも参照されない
+#   (見始めるのは挙動変更になるため、ここでも見ない)
+
+
+def resolve_talk_list_width_ratio(acfg, tun):
+    """一覧幅比の解決: アプリ別値があればそれを、無ければ tun の値
+    (無ければ既定 0.32) を返す。変換 (float 化等) は呼び出し側で行う。"""
+    v = (acfg or {}).get("talk_list_width_ratio")
+    if v is None:
+        v = (tun or {}).get(
+            "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
+        )
+    return v
+
+
+def resolve_relearn_header_prefix_max_extra(tun):
+    """ヘッダ前方一致の余り上限の解決: tun の値 (無ければ既定 2) を
+    int で返す。acfg 直下の同名キーは見ない (現行どおり)。"""
+    return int(
+        (tun or {}).get(
+            "relearn_header_prefix_max_extra",
+            DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
+        )
+    )
+
+
 # --- 慎重モード (careful) の設定 ------------------------------------------------
 # ケース依存の値 (探索グリッド・許容差・自己確認文面) はアプリ別の
 # "careful" 設定で持つ。新しいケースへの対応は変数の変更で済ませる。
@@ -1051,11 +1083,7 @@ def build_verify_script(name, app, acfg, tun=None):
     """
     if tun is None:
         tun = DEFAULT_TUNABLES
-    ratio_v = (acfg or {}).get("talk_list_width_ratio")
-    if ratio_v is None:
-        ratio_v = tun.get(
-            "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
-        )
+    ratio_v = resolve_talk_list_width_ratio(acfg, tun)
     max_y_v = (acfg or {}).get("header_verify_crop_max_y")
     if max_y_v is None:
         max_y_v = tun.get("header_verify_crop_max_y")
@@ -1546,20 +1574,11 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
     # (relearn_header_max_y / relearn_header_prefix_max_extra) を使う。
     # トーク一覧 (左ペイン) に写った宛先名では合格しない。
     aliases = list(acfg.get("recipient_aliases", []))
-    ratio_v = (acfg or {}).get("talk_list_width_ratio")
-    if ratio_v is None:
-        ratio_v = tun.get(
-            "talk_list_width_ratio", DEFAULT_TUNABLES["talk_list_width_ratio"]
-        )
+    ratio_v = resolve_talk_list_width_ratio(acfg, tun)
     header_max_y = float(
         tun.get("relearn_header_max_y", DEFAULT_TUNABLES["relearn_header_max_y"])
     )
-    max_extra = int(
-        tun.get(
-            "relearn_header_prefix_max_extra",
-            DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
-        )
-    )
+    max_extra = resolve_relearn_header_prefix_max_extra(tun)
     merge_px = float(
         tun.get("talk_row_merge_px", DEFAULT_TUNABLES["talk_row_merge_px"])
     )
@@ -2181,12 +2200,7 @@ class Runner:
         """
         other_names = self.other_recipient_formal_names()
         aliases = list(self.acfg.get("recipient_aliases", []))
-        max_extra = int(
-            self.tunables.get(
-                "relearn_header_prefix_max_extra",
-                DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
-            )
-        )
+        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
         state = {"last_status": "no_result", "last_vchecks": None}
 
         def attempt_fn():
@@ -2944,12 +2958,7 @@ class Runner:
                     }
                 )
                 return False
-        max_extra = int(
-            self.tunables.get(
-                "relearn_header_prefix_max_extra",
-                DEFAULT_TUNABLES["relearn_header_prefix_max_extra"],
-            )
-        )
+        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
         other_names = self.other_recipient_formal_names()
 
         def attempt_fn():
@@ -3031,10 +3040,7 @@ class Runner:
         0.32 では開いた先のヘッダ名まで一覧側に含めてしまい、ヘッダ
         確認が常時失敗する) のため、アプリ別の上書きを可能にする。
         """
-        v = self.app_cfg.get("talk_list_width_ratio")
-        if v is None:
-            v = self.tunables["talk_list_width_ratio"]
-        return float(v)
+        return float(resolve_talk_list_width_ratio(self.app_cfg, self.tunables))
 
     def find_talk_candidates(self, name, frame, items):
         """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
@@ -3159,7 +3165,7 @@ class Runner:
         # 一覧側の完全一致 (クリック前に確定) が安全側の担保になる。
         # この判定はアプリ共通経路であり、LINE / Discord の両方に効く。
         fw2 = (_frame2 or frame)[2]
-        max_extra = int(self.tunables["relearn_header_prefix_max_extra"])
+        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
         header_runs = header_region_runs(
             items2,
             fw2,
