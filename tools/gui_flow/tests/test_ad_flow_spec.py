@@ -377,7 +377,74 @@ def test_post_home_retry_with_rail_group_label(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 10. 宛先行が複数 -> ambiguous で停止 (クリックしない)
+# 10. 実クライアントのキュー規約 (2026-11-07 の初回実働の失敗の回帰防止)
+#     - キュー名は .sh で終わること (付け忘れると Mac 側で実行されない)
+#     - スクリプト内の結果ファイル名 __NAME__ は実名に置換されていること
+#     - キュー待ちタイムアウトは失敗 (None) として扱うこと
+# ---------------------------------------------------------------------------
+
+
+class _FakeMac:
+    def __init__(self, res):
+        self.res = res
+        self.calls = []
+
+    def run_queue(self, script, name, extras=()):
+        self.calls.append((script, name))
+        return self.res
+
+
+def _bare_client(mac):
+    client = object.__new__(ad_flow.MacAdClient)
+    client.mac = mac
+    client._seq = 0
+    client.snapshot_last = None
+    return client
+
+
+def test_client_queue_name_and_script_header():
+    mac = _FakeMac({"_files": {"-out.json": '{"ok": true, "data": {}}'}})
+    client = _bare_client(mac)
+    env = client._run_ad("snap", "snapshot --app Discord")
+    assert env is not None and env.get("ok") is True
+    script, name = mac.calls[0]
+    assert name.endswith(".sh")
+    assert "__NAME__" not in script
+    assert name + ".result" in script
+
+
+def test_client_queue_timeout_is_failure():
+    mac = _FakeMac({"status": "queue_timeout", "_files": {}})
+    client = _bare_client(mac)
+    assert client._run_ad("snap", "snapshot --app Discord") is None
+    assert client.snapshot() is None
+
+
+# ---------------------------------------------------------------------------
+# 11. 入力欄の BOM (\ufeff) — 実測: Discord の空欄は BOM + 改行を含む
+# ---------------------------------------------------------------------------
+
+
+def test_bom_only_field_counts_as_blank_and_value_match():
+    assert ad_flow.field_is_blank("\ufeff\n") is True
+    assert ad_flow.field_is_blank("") is True
+    assert ad_flow.field_is_blank("下書き") is False
+    assert ad_flow.value_matches("\ufeff" + TEXT, TEXT) is True
+
+
+def test_post_bom_blank_field_is_not_leftover(monkeypatch):
+    snaps = _success_snapshots()
+    # 開いた直後の入力欄 value に BOM が付いている状態にする
+    opened = snaps[1]
+    for node in ad_flow.iter_nodes(opened["tree"]):
+        if node.get("role") == "textfield":
+            node["value"] = "\ufeff\n"
+    runner, client, approval = _make_runner(monkeypatch, snaps)
+    assert runner.post(TEXT) is True
+
+
+# ---------------------------------------------------------------------------
+# 12. 宛先行が複数 -> ambiguous で停止 (クリックしない)
 # ---------------------------------------------------------------------------
 
 

@@ -157,14 +157,23 @@ def strip_fences(text):
 
 
 def value_matches(value, text):
-    """入力欄の value と期待本文の比較 (末尾の改行 1 つまでの差は許容)。"""
-    v = value or ""
+    """入力欄の value と期待本文の比較。
+
+    Discord の入力欄は空でも BOM (\ufeff) を含むことがある (実測)。
+    先頭の BOM と末尾の改行 1 つまでの差は許容する。
+    """
+    v = (value or "").lstrip("\ufeff")
     if v.endswith("\n"):
         v = v[:-1]
     t = text
     if t.endswith("\n"):
         t = t[:-1]
     return v == t
+
+
+def field_is_blank(value):
+    """入力欄が実質空か (空白と BOM だけなら空とみなす)。"""
+    return not (value or "").strip().strip("\ufeff")
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +262,7 @@ class AdRunner:
             )
         input_ref, value = found
         self._check("recipient", True, "見出しと入力欄で宛先 '%s' を確認" % halias)
-        if (value or "").strip():
+        if not field_is_blank(value):
             return self._fail(
                 "anomaly_leftover",
                 "field_state",
@@ -302,7 +311,7 @@ class AdRunner:
             if header_alias(tree, self.aliases) != halias:
                 problems.append("見出しが宛先でない")
             found = find_input(tree, halias) if halias else None
-            if found is None or (found[1] or "").strip():
+            if found is None or not field_is_blank(found[1]):
                 problems.append("入力欄が空になっていない")
             bodies = message_bodies(tree, halias) if halias else []
             if not bodies or bodies[-1] != strip_fences(text):
@@ -387,13 +396,16 @@ class MacAdClient:
         self.snapshot_last = None
 
     def _name(self, tag):
+        # キュー係が実行するのは .sh で終わる名前だけ (gui_flow と同じ規約)。
+        # 付け忘れると投入したスクリプトが実行されず待ちぼうけになる
+        # (2026-11-07 の初回実働で実際に踏んだ)。
         self._seq += 1
-        return "ad-%s-%d-%d" % (tag, int(time.time()), self._seq)
+        return "ad-%s-%d-%d.sh" % (tag, int(time.time()), self._seq)
 
     def _run_ad(self, tag, ad_args, stdin_file_content=None):
         """agent-desktop を 1 コマンド実行し、封筒 JSON を dict で返す。"""
         name = self._name(tag)
-        parts = [gui_flow.HDR]
+        parts = [gui_flow.HDR.replace("__NAME__", name)]
         if stdin_file_content is not None:
             parts.append(
                 "printf %s '%s' | base64 -D > ~/muse-tools/gf-out/%s-text.txt"
@@ -406,6 +418,8 @@ class MacAdClient:
         parts.append('say "ad_rc=$?"')
         parts.append('say "status=ok"')
         res = self.mac.run_queue("\n".join(parts) + "\n", name, extras=("-out.json",))
+        if res.get("status") == "queue_timeout":
+            return None
         raw = res.get("_files", {}).get("-out.json", "")
         try:
             return json.loads(raw)
@@ -444,7 +458,7 @@ class MacAdClient:
         name = self._name("shot")
         script = "\n".join(
             [
-                gui_flow.HDR,
+                gui_flow.HDR.replace("__NAME__", name),
                 "$SC list > ~/muse-tools/gf-out/%s-list.txt 2>/dev/null" % name,
                 "WID=$(grep 'app=Discord' ~/muse-tools/gf-out/%s-list.txt "
                 "| grep 'onscreen=true' | head -1 "
