@@ -408,7 +408,7 @@ class MacAdClient:
         parts = [gui_flow.HDR.replace("__NAME__", name)]
         if stdin_file_content is not None:
             parts.append(
-                "printf %s '%s' | base64 -D > ~/muse-tools/gf-out/%s-text.txt"
+                "printf %%s '%s' | base64 -D > ~/muse-tools/gf-out/%s-text.txt"
                 % (base64.b64encode(stdin_file_content.encode()).decode(), name)
             )
         cmd = "%s %s" % (AD_BIN, ad_args)

@@ -413,6 +413,15 @@ def test_client_queue_name_and_script_header():
     assert name + ".result" in script
 
 
+def test_client_set_value_script_builds():
+    mac = _FakeMac({"_files": {"-out.json": '{"ok": true, "data": {}}'}})
+    client = _bare_client(mac)
+    assert client.set_value("@snap:e1", "本文\n2行目") is True
+    script, name = mac.calls[0]
+    assert "printf %s '" in script  # printf 自身の %s が潰れていないこと
+    assert "--stdin < ~/muse-tools/gf-out/%s-text.txt" % name in script
+
+
 def test_client_queue_timeout_is_failure():
     mac = _FakeMac({"status": "queue_timeout", "_files": {}})
     client = _bare_client(mac)
