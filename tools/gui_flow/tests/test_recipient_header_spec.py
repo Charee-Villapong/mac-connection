@@ -44,6 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import discord_acfg  # noqa: E402
+from spec_fixtures import line_acfg  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -71,32 +74,8 @@ DISCORD_TEXT = (
 )
 
 
-def line_acfg(aliases=None, **overrides):
-    acfg = {
-        "app_name": "LINE",
-        "window_app": "LINE",
-        "process": "LINE",
-        "input_click": [800, 780],
-        "nav_click": [210, 160],
-        "recipient_aliases": list(aliases) if aliases else [ALIAS],
-        "header_band": 110,
-    }
-    acfg.update(overrides)
-    return acfg
 
 
-def discord_acfg(aliases=None, **overrides):
-    acfg = {
-        "app_name": "Discord",
-        "window_app": "Discord",
-        "process": "Discord",
-        "input_click": [800, 780],
-        "nav_click": [210, 160],
-        "recipient_aliases": list(aliases) if aliases else [ALIAS],
-        "header_band": 110,
-    }
-    acfg.update(overrides)
-    return acfg
 
 
 def ocr_line(x, y, w, h, text):

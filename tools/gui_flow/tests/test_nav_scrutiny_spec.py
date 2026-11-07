@@ -31,6 +31,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import make_cfg_nav_scrutiny as _make_cfg  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Fixture data
 # ---------------------------------------------------------------------------
@@ -65,36 +67,6 @@ def _item(text, row, x=100, w=120):
     }
 
 
-def _make_cfg(saved_nav):
-    saved = list(saved_nav)
-    return {
-        # Runner 生成時に Mac オブジェクトが参照するだけのダミー (接続はしない)
-        "ssh": {
-            "host": "127.0.0.1",
-            "user": "test-user",
-            "identity": "/tmp/id_test_dummy",
-            "control_path": "/tmp/gf-test-ctl",
-            "proxy_script": "/tmp/proxy_test_dummy.sh",
-        },
-        "apps": {
-            "line": {
-                "app_name": "LINE",
-                "window_app": "LINE",
-                "process": "LINE",
-                "input_click": [800, 780],
-                "nav_click": list(saved),
-                "default_recipient": RECIPIENT_ID,
-                "recipients": {
-                    RECIPIENT_ID: {
-                        "aliases": [ALIAS],
-                        "nav_click": list(saved),
-                    }
-                },
-                "recipient_aliases": [ALIAS],
-                "talk_list_width_ratio": TALK_LIST_WIDTH_RATIO,
-            }
-        },
-    }
 
 
 class _Record:

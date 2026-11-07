@@ -34,13 +34,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
+from spec_fixtures import app_cfg as _app_cfg  # noqa: E402
+from spec_fixtures import make_ssh  # noqa: E402
+
+DUMMY_SSH = make_ssh()
 
 # 仕様 3・5 の前提となる窓幅 1420pt のフレーム (x, y, w, h)
 FRAME = (0, 30, 1420, 850)
@@ -57,21 +54,6 @@ def _item(x, y, text, w=120, h=20):
     return {"x": x, "y": y, "w": w, "h": h, "conf": 1.0, "text": text}
 
 
-def _app_cfg(label, default_id, ratio):
-    cfg = {
-        "app_name": label,
-        "window_app": label,
-        "process": label,
-        "input_click": [800, 780] if label == "LINE" else [700, 852],
-        "header_band": 110,
-        "default_recipient": default_id,
-        "recipients": {
-            default_id: {"aliases": [default_id], "nav_click": [100, 120]},
-        },
-    }
-    if ratio is not None:
-        cfg["talk_list_width_ratio"] = ratio
-    return cfg
 
 
 def _runner(

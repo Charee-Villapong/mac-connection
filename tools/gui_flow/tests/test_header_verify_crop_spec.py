@@ -34,6 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import make_bare_discord_acfg  # noqa: E402
+from spec_fixtures import make_bare_line_acfg_verify_crop  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -50,25 +53,9 @@ TUN_RELEARN = 244
 
 # build_verify_script 用の素の acfg (test_header_crop_spec.py の
 # BARE_ACFG と同形)
-BARE_DISCORD_ACFG = {
-    "app_name": "Discord",
-    "window_app": "Discord",
-    "process": "Discord",
-    "input_click": [700, 852],
-    "nav_click": [174, 350],
-    "recipient_aliases": ["example-dm"],
-    "header_band": 110,
-}
+BARE_DISCORD_ACFG = make_bare_discord_acfg()
 
-BARE_LINE_ACFG = {
-    "app_name": "LINE",
-    "window_app": "LINE",
-    "process": "LINE",
-    "input_click": [800, 780],
-    "nav_click": [210, 160],
-    "recipient_aliases": ["example-dm"],
-    "header_band": 110,
-}
+BARE_LINE_ACFG = make_bare_line_acfg_verify_crop()
 
 _MAX_Y_RE = re.compile(r"max_y=(\d+(?:\.\d+)?)")
 

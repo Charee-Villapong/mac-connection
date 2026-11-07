@@ -35,6 +35,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import make_cfg_nav_home as _make_cfg  # noqa: E402
+
 FRAME = (0, 30, 1440, 870)
 TALK_LIST_WIDTH_RATIO = 0.27
 
@@ -60,34 +62,6 @@ def _item(text, row, x=100, w=120):
     }
 
 
-def _make_cfg(saved_nav, home_click):
-    app = {
-        "app_name": "Discord",
-        "window_app": "Discord",
-        "process": "Discord",
-        "input_click": [700, 780],
-        "default_recipient": RECIPIENT_ID,
-        "recipients": {
-            RECIPIENT_ID: {
-                "aliases": [ALIAS],
-                "nav_click": list(saved_nav),
-            }
-        },
-        "recipient_aliases": [ALIAS],
-        "talk_list_width_ratio": TALK_LIST_WIDTH_RATIO,
-    }
-    if home_click is not None:
-        app["home_click"] = list(home_click)
-    return {
-        "ssh": {
-            "host": "127.0.0.1",
-            "user": "test-user",
-            "identity": "/tmp/id_test_dummy",
-            "control_path": "/tmp/gf-test-ctl",
-            "proxy_script": "/tmp/proxy_test_dummy.sh",
-        },
-        "apps": {"discord": app},
-    }
 
 
 class _Record:

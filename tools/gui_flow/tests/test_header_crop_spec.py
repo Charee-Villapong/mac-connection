@@ -61,6 +61,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import make_bare_discord_acfg  # noqa: E402
+from spec_fixtures import make_cfg_header_multi as make_cfg  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
@@ -100,24 +103,9 @@ DISCORD_BODY_LINES = [
     "返信は不要です。",
 ]
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
 
 # build_verify_script 用の素の acfg (test_gui_flow.py の DISCORD_CFG と同形)
-BARE_ACFG = {
-    "app_name": "Discord",
-    "window_app": "Discord",
-    "process": "Discord",
-    "input_click": [700, 852],
-    "nav_click": [174, 350],
-    "recipient_aliases": ["example-dm"],
-    "header_band": 110,
-}
+BARE_ACFG = make_bare_discord_acfg()
 
 
 def ocr_line(x, y, w, h, text):
@@ -129,38 +117,6 @@ def header_ocr_text(text):
     return ocr_line(500, 60, 200, 30, text)
 
 
-def make_cfg(tunables=None):
-    recipients = {
-        TARGET: {"aliases": [TARGET, TARGET_ALIAS_SHORT], "nav_click": [210, 160]},
-        OTHER: {"aliases": [OTHER, "太郎"], "nav_click": [210, 232]},
-        OTHER_2: {"aliases": [OTHER_2, "次郎"], "nav_click": [210, 304]},
-    }
-    cfg = {
-        "ssh": dict(DUMMY_SSH),
-        "apps": {
-            "line": {
-                "app_name": "LINE",
-                "window_app": "LINE",
-                "process": "LINE",
-                "input_click": [800, 780],
-                "header_band": 110,
-                "default_recipient": TARGET,
-                "recipients": recipients,
-            },
-            "discord": {
-                "app_name": "Discord",
-                "window_app": "Discord",
-                "process": "Discord",
-                "input_click": [700, 852],
-                "header_band": 110,
-                "default_recipient": TARGET,
-                "recipients": recipients,
-            },
-        },
-    }
-    if tunables:
-        cfg["tunables"] = tunables
-    return cfg
 
 
 def _no_sleep(monkeypatch):

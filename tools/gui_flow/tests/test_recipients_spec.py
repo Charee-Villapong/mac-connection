@@ -20,6 +20,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import make_bare_discord_acfg  # noqa: E402
+from spec_fixtures import make_cfg_recipients as make_cfg  # noqa: E402
+from spec_fixtures import make_ssh  # noqa: E402
+
 GUI_FLOW_DIR = Path(__file__).resolve().parents[1]
 FREEE_TEXT_DIR = Path.home() / "workspace" / "goals" / "freee" / "hidden_files"
 
@@ -37,48 +41,7 @@ LINE_TEXT = """【AIエージェントからのお知らせ】
 送信はしません。
 確認が終わったら消します。"""
 
-SSH_CFG = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
-
-
-def make_cfg():
-    """宛先を 2 件ずつ持つ新形式 config (既定は 1 件目)。"""
-    return {
-        "ssh": dict(SSH_CFG),
-        "apps": {
-            "discord": {
-                "app_name": "Discord",
-                "window_app": "Discord",
-                "process": "Discord",
-                "input_click": [700, 852],
-                "header_band": 110,
-                "learned_frame": [0, 30, 1440, 870],
-                "default_recipient": "alice",
-                "recipients": {
-                    "alice": {"aliases": ["Alice"], "nav_click": [10, 20]},
-                    "bob": {"aliases": ["Bob", "bobby"], "nav_click": [30, 40]},
-                },
-            },
-            "line": {
-                "app_name": "LINE",
-                "window_app": "LINE",
-                "process": "LINE",
-                "input_click": [800, 780],
-                "header_band": 110,
-                "learned_frame": [0, 30, 1440, 870],
-                "default_recipient": "kei",
-                "recipients": {
-                    "kei": {"aliases": ["Kei", "ケイ"], "nav_click": [210, 160]},
-                    "taro": {"aliases": ["Taro", "太郎"], "nav_click": [210, 300]},
-                },
-            },
-        },
-    }
+SSH_CFG = make_ssh()
 
 
 def ocr_line(x, y, text):
@@ -154,15 +117,7 @@ def pre_send_with_mocked_mac(runner, text, ocr_text):
 
 
 def test_old_format_config_reads_as_single_default_recipient():
-    old = {
-        "app_name": "Discord",
-        "window_app": "Discord",
-        "process": "Discord",
-        "input_click": [700, 852],
-        "nav_click": [174, 350],
-        "recipient_aliases": ["example-dm"],
-        "header_band": 110,
-    }
+    old = make_bare_discord_acfg()
     recipients, default_id = gui_flow.recipients_of(old)
     assert default_id == "example-dm"
     assert recipients == {

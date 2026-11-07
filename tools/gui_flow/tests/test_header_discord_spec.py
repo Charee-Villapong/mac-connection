@@ -42,14 +42,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gui_flow  # noqa: E402
 
+from spec_fixtures import load_example  # noqa: E402
+from spec_fixtures import make_bare_discord_acfg  # noqa: E402
+from spec_fixtures import make_cfg_example_based as make_cfg  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-GUI_FLOW_DIR = Path(__file__).resolve().parents[1]
-EXAMPLE = json.loads(
-    (GUI_FLOW_DIR / "config.example.json").read_text(encoding="utf-8")
-)
+EXAMPLE = load_example()
 
 # A1 の前提となる窓幅 (フレーム幅 1440pt)。
 WIN_WIDTH = 1440
@@ -62,25 +63,10 @@ OTHER = "テスト太郎"
 # 定義・課題が C4 の例として挙げる LINE 宛先名。
 LINE_TARGET = "山田花"
 
-DUMMY_SSH = {
-    "user": "test-user",
-    "host": "192.0.2.1",
-    "identity": "/tmp/id_test",
-    "proxy_script": "/tmp/proxy.sh",
-    "control_path": "/tmp/gf-test-ctl",
-}
 
 # build_verify_script 用の素の acfg (test_header_crop_spec.py の
 # BARE_ACFG と同形)。talk_list_width_ratio キーを意図的に持たない。
-BARE_ACFG = {
-    "app_name": "Discord",
-    "window_app": "Discord",
-    "process": "Discord",
-    "input_click": [700, 852],
-    "nav_click": [174, 350],
-    "recipient_aliases": ["example-dm"],
-    "header_band": 110,
-}
+BARE_ACFG = make_bare_discord_acfg()
 
 
 def ocr_line(x, y, w, h, text):
@@ -96,34 +82,6 @@ def _no_sleep(monkeypatch):
     monkeypatch.setattr(gui_flow.time, "sleep", lambda s: None)
 
 
-def make_cfg():
-    """example の apps / tunables を正として複製した合成 config。
-
-    apps.discord / apps.line のキー (幾何の比率や、定義 B5 の有効化
-    設定を含む) は example の値をそのまま保持し、宛先だけを
-    テスト用に差し替える。
-    """
-    cfg = {
-        "ssh": dict(DUMMY_SSH),
-        "tunables": copy.deepcopy(EXAMPLE.get("tunables", {})),
-        "apps": {
-            "discord": copy.deepcopy(EXAMPLE["apps"]["discord"]),
-            "line": copy.deepcopy(EXAMPLE["apps"]["line"]),
-        },
-    }
-    cfg["apps"]["discord"]["recipients"] = {
-        DISCORD_TARGET: {
-            "aliases": [DISCORD_TARGET],
-            "nav_click": [174, 350],
-        },
-        OTHER: {"aliases": [OTHER], "nav_click": [210, 232]},
-    }
-    cfg["apps"]["discord"]["default_recipient"] = DISCORD_TARGET
-    cfg["apps"]["line"]["recipients"] = {
-        LINE_TARGET: {"aliases": [LINE_TARGET], "nav_click": [210, 160]},
-    }
-    cfg["apps"]["line"]["default_recipient"] = LINE_TARGET
-    return cfg
 
 
 def make_header_runner(monkeypatch, app, target, header_ocr_text):
