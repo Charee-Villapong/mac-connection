@@ -1110,6 +1110,57 @@ def _script_number(value):
     return ("%f" % f).rstrip("0").rstrip(".")
 
 
+def _verify_header_crop_lines(ratio_lit, max_y_lit):
+    """build_verify_script のヘッダ帯切り出し OCR 部分の生成行を返す。"""
+    parts = []
+    # ヘッダ帯の切り出し OCR (全体 OCR の後)。フレーム幅・高さは
+    # $WIN の第 4 / 5 フィールド (pt)、PNG 実寸は sips で取る (px)。
+    # 切り出し矩形 (x0 / 幅 / 高さ) は awk で算出し、PNG 高でクランプ
+    # する。入力が不正 (数値でない・0 以下等) なら CROP は空になり、
+    # 切り出しをスキップして -header-ocr.txt は空のままになる。
+    parts.append(": > ~/muse-tools/gf-out/__NAME__-header-ocr.txt")
+    parts.append('FW=$(printf %s "$WIN" | cut -d" " -f4)')
+    parts.append('FH=$(printf %s "$WIN" | cut -d" " -f5)')
+    parts.append(
+        "PW=$(sips -g pixelWidth ~/muse-tools/gf-out/__NAME__.png "
+        "2>/dev/null | awk '/pixelWidth/ {print $2}')"
+    )
+    parts.append(
+        "PH=$(sips -g pixelHeight ~/muse-tools/gf-out/__NAME__.png "
+        "2>/dev/null | awk '/pixelHeight/ {print $2}')"
+    )
+    parts.append(
+        'CROP=$(printf "%s %s %s %s" "$PW" "$PH" "$FW" "$FH" | '
+        "awk -v ratio=" + ratio_lit + " -v max_y=" + max_y_lit + " '"
+        "{ pw=$1; ph=$2; fw=$3; fh=$4; "
+        "if (pw<=0 || ph<=0 || fw<=0 || fh<=0) exit; "
+        "x0=int(pw*ratio+0.5); w=pw-x0; h=int(ph*max_y/fh+0.5); "
+        "if (h>ph) h=ph; "
+        "if (w<=0 || h<=0 || x0<0) exit; "
+        'print x0" "w" "h }\')'
+    )
+    parts.append('if [ -n "$CROP" ]; then')
+    parts.append('  X0=$(printf %s "$CROP" | cut -d" " -f1)')
+    parts.append('  CW=$(printf %s "$CROP" | cut -d" " -f2)')
+    parts.append('  CH=$(printf %s "$CROP" | cut -d" " -f3)')
+    # sips の cropOffset は (y, x) の順・左上原点 (Mac で実測済み)。
+    # ヘッダ帯は上端からなので y_px = 0。
+    parts.append(
+        "  sips -c $CH $CW --cropOffset 0 $X0 "
+        "~/muse-tools/gf-out/__NAME__.png "
+        "--out ~/muse-tools/gf-out/__NAME__-header.png >/dev/null 2>&1"
+    )
+    parts.append("  if [ -s ~/muse-tools/gf-out/__NAME__-header.png ]; then")
+    parts.append(
+        "    swift ~/muse-tools/ocr.swift "
+        "~/muse-tools/gf-out/__NAME__-header.png "
+        "> ~/muse-tools/gf-out/__NAME__-header-ocr.txt 2>&1"
+    )
+    parts.append("  fi")
+    parts.append("fi")
+    return parts
+
+
 def build_verify_script(name, app, acfg, tun=None):
     """検閲フェーズ: ウィンドウ特定 → 撮影 → OCR。撮影はこの 1 回だけ。
 
@@ -1159,51 +1210,8 @@ def build_verify_script(name, app, acfg, tun=None):
         "swift ~/muse-tools/ocr.swift ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-ocr.txt 2>&1"
     )
-    # ヘッダ帯の切り出し OCR (全体 OCR の後)。フレーム幅・高さは
-    # $WIN の第 4 / 5 フィールド (pt)、PNG 実寸は sips で取る (px)。
-    # 切り出し矩形 (x0 / 幅 / 高さ) は awk で算出し、PNG 高でクランプ
-    # する。入力が不正 (数値でない・0 以下等) なら CROP は空になり、
-    # 切り出しをスキップして -header-ocr.txt は空のままになる。
-    parts.append(": > ~/muse-tools/gf-out/__NAME__-header-ocr.txt")
-    parts.append('FW=$(printf %s "$WIN" | cut -d" " -f4)')
-    parts.append('FH=$(printf %s "$WIN" | cut -d" " -f5)')
-    parts.append(
-        "PW=$(sips -g pixelWidth ~/muse-tools/gf-out/__NAME__.png "
-        "2>/dev/null | awk '/pixelWidth/ {print $2}')"
-    )
-    parts.append(
-        "PH=$(sips -g pixelHeight ~/muse-tools/gf-out/__NAME__.png "
-        "2>/dev/null | awk '/pixelHeight/ {print $2}')"
-    )
-    parts.append(
-        'CROP=$(printf "%s %s %s %s" "$PW" "$PH" "$FW" "$FH" | '
-        "awk -v ratio=" + ratio_lit + " -v max_y=" + max_y_lit + " '"
-        "{ pw=$1; ph=$2; fw=$3; fh=$4; "
-        "if (pw<=0 || ph<=0 || fw<=0 || fh<=0) exit; "
-        "x0=int(pw*ratio+0.5); w=pw-x0; h=int(ph*max_y/fh+0.5); "
-        "if (h>ph) h=ph; "
-        "if (w<=0 || h<=0 || x0<0) exit; "
-        'print x0" "w" "h }\')'
-    )
-    parts.append('if [ -n "$CROP" ]; then')
-    parts.append('  X0=$(printf %s "$CROP" | cut -d" " -f1)')
-    parts.append('  CW=$(printf %s "$CROP" | cut -d" " -f2)')
-    parts.append('  CH=$(printf %s "$CROP" | cut -d" " -f3)')
-    # sips の cropOffset は (y, x) の順・左上原点 (Mac で実測済み)。
-    # ヘッダ帯は上端からなので y_px = 0。
-    parts.append(
-        "  sips -c $CH $CW --cropOffset 0 $X0 "
-        "~/muse-tools/gf-out/__NAME__.png "
-        "--out ~/muse-tools/gf-out/__NAME__-header.png >/dev/null 2>&1"
-    )
-    parts.append("  if [ -s ~/muse-tools/gf-out/__NAME__-header.png ]; then")
-    parts.append(
-        "    swift ~/muse-tools/ocr.swift "
-        "~/muse-tools/gf-out/__NAME__-header.png "
-        "> ~/muse-tools/gf-out/__NAME__-header-ocr.txt 2>&1"
-    )
-    parts.append("  fi")
-    parts.append("fi")
+    parts.extend(_verify_header_crop_lines(ratio_lit, max_y_lit))
+
     parts.append('say "status=ok"')
     return ("\n".join(parts) + "\n").replace("__NAME__", name)
 
@@ -1572,27 +1580,8 @@ def best_match(expected, candidates):
     return best, best_r
 
 
-def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
-    """verify の必須チェック一式。戻り値は checks のリスト。
-
-    本文の照合は「アンカー方式」: 期待文の先頭行に最もよく一致する OCR 行を
-    アンカーとし、その周辺の帯を対象領域とする。入力欄は行数に応じて
-    上方向に伸びるため、固定オフセットでは領域を決めない。
-    一致しきい値は tunables (tun) から取る (変数化。既定値は現行値)。
-    """
-    tun = tun or DEFAULT_TUNABLES
-    checks = []
-    items = parse_ocr(ocr_text)
-    if not items:
-        return [
-            {
-                "name": "ocr_readable",
-                "ok": False,
-                "evidence": "OCR で文字が読めなかった (画面が見えていない可能性)",
-            }
-        ]
-    height = win[4]
-
+def _append_recipient_check(checks, items, win, acfg, tun):
+    """run_verify_checks の宛先チェック (ヘッダ領域) を checks へ追加する。"""
     # 1) 宛先 (ヘッダ領域専用。画面全体では合格にしない)
     # ヘッダ領域 = 中心 x がフレーム幅 × 一覧幅比を超え、y が上限未満。
     # 一覧幅比は Runner.talk_list_width_ratio と同じ規則 (acfg の
@@ -1645,27 +1634,10 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
         }
     )
 
-    # 2) 構造 (Discord はコードブロック形式か) — 期待文そのもので判定
-    if app == "discord":
-        ls = expected_text.strip().split("\n")
-        struct_ok = ls[0].strip() == FENCE and ls[-1].strip() == FENCE
-        checks.append(
-            {
-                "name": "structure_codeblock",
-                "ok": struct_ok,
-                "evidence": (
-                    "コードブロック (``` で囲み) 形式"
-                    if struct_ok
-                    else "フェンス行が無い"
-                ),
-            }
-        )
 
-    # 3) 1 行目 + 本文 (アンカー方式・行単位・順序つき)
-    lines = content_lines(app, expected_text)
-    if not lines:
-        checks.append({"name": "body_match", "ok": False, "evidence": "期待文が空"})
-        return checks
+def _append_body_checks(checks, app, items, lines, tun):
+    """run_verify_checks の 1 行目 + 本文章チェックを checks へ追加し、
+    (本文の全行一致か, 照合帯の下端) を返す。"""
     scored = [(ratio(lines[0], it["text"]), it) for it in items]
     best_r = max(r for r, _ in scored)
     strong = [it for r, it in scored if r >= tun["strong_threshold"]]
@@ -1728,7 +1700,11 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
             % (" | ".join(per_line), "OK" if order_ok else "NG"),
         }
     )
+    return all_ok, bottom
 
+
+def _append_field_state_check(checks, mode, all_ok, items, bottom, height, lines, tun):
+    """run_verify_checks の入力欄の状態チェックを checks へ追加する。"""
     # 4) 入力欄の状態
     if mode == "field":
         checks.append(
@@ -1773,6 +1749,55 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
                 ),
             }
         )
+
+
+def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
+    """verify の必須チェック一式。戻り値は checks のリスト。
+
+    本文の照合は「アンカー方式」: 期待文の先頭行に最もよく一致する OCR 行を
+    アンカーとし、その周辺の帯を対象領域とする。入力欄は行数に応じて
+    上方向に伸びるため、固定オフセットでは領域を決めない。
+    一致しきい値は tunables (tun) から取る (変数化。既定値は現行値)。
+    """
+    tun = tun or DEFAULT_TUNABLES
+    checks = []
+    items = parse_ocr(ocr_text)
+    if not items:
+        return [
+            {
+                "name": "ocr_readable",
+                "ok": False,
+                "evidence": "OCR で文字が読めなかった (画面が見えていない可能性)",
+            }
+        ]
+    height = win[4]
+
+    _append_recipient_check(checks, items, win, acfg, tun)
+
+    # 2) 構造 (Discord はコードブロック形式か) — 期待文そのもので判定
+    if app == "discord":
+        ls = expected_text.strip().split("\n")
+        struct_ok = ls[0].strip() == FENCE and ls[-1].strip() == FENCE
+        checks.append(
+            {
+                "name": "structure_codeblock",
+                "ok": struct_ok,
+                "evidence": (
+                    "コードブロック (``` で囲み) 形式"
+                    if struct_ok
+                    else "フェンス行が無い"
+                ),
+            }
+        )
+
+    # 3) 1 行目 + 本文 (アンカー方式・行単位・順序つき)
+    lines = content_lines(app, expected_text)
+    if not lines:
+        checks.append({"name": "body_match", "ok": False, "evidence": "期待文が空"})
+        return checks
+    all_ok, bottom = _append_body_checks(checks, app, items, lines, tun)
+
+    _append_field_state_check(checks, mode, all_ok, items, bottom, height, lines, tun)
     return checks
 
 
@@ -2577,174 +2602,76 @@ class _NavMixin:
                 exact.append((point, text))
         return exact
 
-    def scrutinize_nav(self):
-        """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
-        行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
+    def _nav_home_rescue(self, frame, items, aliases):
+        """候補 0 件時のホーム遷移による再探索 (scrutinize_nav から分離)。
 
-        一覧の並び替えで保存座標が別人の行を指すようになっている場合に、
-        その座標で開いてしまう事故を防ぐ前段ゲート。宛先エイリアス
-        ごとに find_talk_candidates で一覧探索し (再学習と同じ規則)、
-        返ってきた候補のうちエイリアスのいずれかと完全一致するもの
-        だけを「完全一致候補」とする (部分一致のみは候補に数えない)。
-        行の同一性は縦座標で判定する (横は一覧領域内であることが
-        候補の条件で担保される)。許容差は tunables の
-        nav_scrutiny_row_tolerance_px。
-
-        - 候補 1 件かつ保存座標と同じ行: 通過 (クリック・保存なし)
-        - 候補 1 件だが保存座標と違う行: その行をクリックして開き、
-          recipients 辞書の nav_click を候補座標へ更新して保存する
-          (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
-          同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
-          入力が新しい座標を使うようにする
-        - 候補 0 件で実効設定に home_click がある場合のみ、救済として
-          ホームボタンへ 1 回だけ遷移し、再撮影して探索をやり直す
-          (アプリが別画面を開いていて一覧が見えていないケース)。
-          再探索で候補が 1 件見つかれば通常の判定に合流する。
-          クリック失敗時は nav_home_click_failed、再撮影不可は
-          nav_scrutiny_unreadable で停止する。試行は checks の
-          nav_home に残す
-        - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
-          False を返し、self.nav_scrutiny_error に理由を残す
-          (クリックも設定変更もしない。修正クリック失敗時と
-          上記のホーム救済時を除く)
-        - nav_click 未設定で候補 1 件: それを正として通過扱い
-        精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
-        この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
-        talk_list_width_ratio() がアプリ別に解決するため、LINE /
-        Discord の両方で同じ精査が効く。
-        結果は checks の nav_scrutiny に残す。戻り値: 通過なら True。
-        """
-        self.nav_scrutiny_error = None
-        aliases = list(self.acfg.get("recipient_aliases", []))
-        frame, items = self.capture_ocr()
-        if frame is None or not items:
-            self.nav_scrutiny_error = "nav_scrutiny_unreadable"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧を読み取れなかった "
-                    "(撮影・OCR ができず nav_click を精査できない / "
-                    "想定宛先: %s)" % "/".join(aliases),
-                }
-            )
-            return False
-        exact = self._exact_nav_candidates(frame, items, aliases)
-        if not exact:
-            home = self.acfg.get("home_click")
-            if home:
-                # 救済: アプリが別画面 (Discord のサーバー画面など) を開いて
-                # いて DM 一覧が見えていないケース。ホームボタンへ 1 回だけ
-                # 遷移して再探索する。クリックは最大 1 回で、文字入力・
-                # 送信キーは行わない。home_click 未設定なら従来どおり
-                # この救済は発動せず、そのまま未検出で停止する。
-                home_point = tuple(int(v) for v in home)
-                if self.click_point(home_point) is False:
-                    self.checks.append(
-                        {
-                            "name": "nav_home",
-                            "ok": False,
-                            "evidence": "ホームボタン (%d, %d) をクリック"
-                            "できなかったため、再探索せず停止" % home_point,
-                        }
-                    )
-                    self.nav_scrutiny_error = "nav_home_click_failed"
-                    self.checks.append(
-                        {
-                            "name": "nav_scrutiny",
-                            "ok": False,
-                            "evidence": "ホーム遷移のクリックに失敗したため"
-                            " nav_click を精査できない (想定宛先: %s)"
-                            % "/".join(aliases),
-                        }
-                    )
-                    return False
-                frame, items = self.capture_ocr()
-                if frame is None or not items:
-                    self.checks.append(
-                        {
-                            "name": "nav_home",
-                            "ok": False,
-                            "evidence": "ホーム遷移後のトーク一覧を"
-                            "読み取れなかった (撮影・OCR 不可)",
-                        }
-                    )
-                    self.nav_scrutiny_error = "nav_scrutiny_unreadable"
-                    self.checks.append(
-                        {
-                            "name": "nav_scrutiny",
-                            "ok": False,
-                            "evidence": "ホーム遷移後にトーク一覧を"
-                            "読み取れなかった (撮影・OCR ができず "
-                            "nav_click を精査できない / 想定宛先: %s)"
-                            % "/".join(aliases),
-                        }
-                    )
-                    return False
-                exact = self._exact_nav_candidates(frame, items, aliases)
+        停止する場合は None、続行できる場合は (frame, items, exact) を
+        返す。home_click 未設定なら再探索せず元の値をそのまま返す。"""
+        exact = []
+        home = self.acfg.get("home_click")
+        if home:
+            # 救済: アプリが別画面 (Discord のサーバー画面など) を開いて
+            # いて DM 一覧が見えていないケース。ホームボタンへ 1 回だけ
+            # 遷移して再探索する。クリックは最大 1 回で、文字入力・
+            # 送信キーは行わない。home_click 未設定なら従来どおり
+            # この救済は発動せず、そのまま未検出で停止する。
+            home_point = tuple(int(v) for v in home)
+            if self.click_point(home_point) is False:
                 self.checks.append(
                     {
                         "name": "nav_home",
-                        "ok": bool(exact),
-                        "evidence": "ホームボタン (%d, %d) へ遷移して"
-                        "再探索した (完全一致候補 %d 件)"
-                        % (home_point + (len(exact),)),
+                        "ok": False,
+                        "evidence": "ホームボタン (%d, %d) をクリック"
+                        "できなかったため、再探索せず停止" % home_point,
                     }
                 )
-        if not exact:
-            self.nav_scrutiny_error = "nav_recipient_not_found"
+                self.nav_scrutiny_error = "nav_home_click_failed"
+                self.checks.append(
+                    {
+                        "name": "nav_scrutiny",
+                        "ok": False,
+                        "evidence": "ホーム遷移のクリックに失敗したため"
+                        " nav_click を精査できない (想定宛先: %s)" % "/".join(aliases),
+                    }
+                )
+                return None
+            frame, items = self.capture_ocr()
+            if frame is None or not items:
+                self.checks.append(
+                    {
+                        "name": "nav_home",
+                        "ok": False,
+                        "evidence": "ホーム遷移後のトーク一覧を"
+                        "読み取れなかった (撮影・OCR 不可)",
+                    }
+                )
+                self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+                self.checks.append(
+                    {
+                        "name": "nav_scrutiny",
+                        "ok": False,
+                        "evidence": "ホーム遷移後にトーク一覧を"
+                        "読み取れなかった (撮影・OCR ができず "
+                        "nav_click を精査できない / 想定宛先: %s)" % "/".join(aliases),
+                    }
+                )
+                return None
+            exact = self._exact_nav_candidates(frame, items, aliases)
             self.checks.append(
                 {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が"
-                    "見つからない (部分一致のみは候補にしない)" % "/".join(aliases),
+                    "name": "nav_home",
+                    "ok": bool(exact),
+                    "evidence": "ホームボタン (%d, %d) へ遷移して"
+                    "再探索した (完全一致候補 %d 件)" % (home_point + (len(exact),)),
                 }
             )
-            return False
-        if len(exact) > 1:
-            self.nav_scrutiny_error = "nav_recipient_ambiguous"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が "
-                    "%d 件あり特定できない (何も変更せず停止)"
-                    % ("/".join(aliases), len(exact)),
-                }
-            )
-            return False
-        (cx, cy), row_text = exact[0]
-        nav = self.acfg.get("nav_click")
-        if not nav:
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": True,
-                    "evidence": "nav_click 未設定のため、トーク一覧で"
-                    "見つけた宛先 '%s' の行 (%d, %d) を正として通過"
-                    % (row_text, cx, cy),
-                }
-            )
-            return True
-        tolerance = float(
-            self.tunables.get(
-                "nav_scrutiny_row_tolerance_px",
-                DEFAULT_TUNABLES["nav_scrutiny_row_tolerance_px"],
-            )
-        )
-        if abs(cy - int(nav[1])) <= tolerance:
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": True,
-                    "evidence": "保存済み nav_click (%d, %d) の行が宛先 "
-                    "'%s' 本人であることを確認 (候補行 (%d, %d) との"
-                    "縦座標差が許容差 %dpx 以内)"
-                    % (int(nav[0]), int(nav[1]), row_text, cx, cy, int(tolerance)),
-                }
-            )
-            return True
+        return frame, items, exact
+
+    def _nav_apply_correction(self, cx, cy, row_text, nav):
+        """保存座標が別人の行を指していた場合の修正 (scrutinize_nav から
+
+        分離): 本人の行を開き、nav_click を候補座標へ更新して保存する。
+        クリックできなければ何も変更せず False を返す。"""
         # 不一致: 保存座標が別人の行を指している。探索で見つけた
         # 本人の行を開き、nav_click をその座標へ更新して保存する。
         old_nav = [int(nav[0]), int(nav[1])]
@@ -2803,6 +2730,121 @@ class _NavMixin:
         )
         return True
 
+    def scrutinize_nav(self):
+        """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
+        行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
+
+        一覧の並び替えで保存座標が別人の行を指すようになっている場合に、
+        その座標で開いてしまう事故を防ぐ前段ゲート。宛先エイリアス
+        ごとに find_talk_candidates で一覧探索し (再学習と同じ規則)、
+        返ってきた候補のうちエイリアスのいずれかと完全一致するもの
+        だけを「完全一致候補」とする (部分一致のみは候補に数えない)。
+        行の同一性は縦座標で判定する (横は一覧領域内であることが
+        候補の条件で担保される)。許容差は tunables の
+        nav_scrutiny_row_tolerance_px。
+
+        - 候補 1 件かつ保存座標と同じ行: 通過 (クリック・保存なし)
+        - 候補 1 件だが保存座標と違う行: その行をクリックして開き、
+          recipients 辞書の nav_click を候補座標へ更新して保存する
+          (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
+          同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
+          入力が新しい座標を使うようにする
+        - 候補 0 件で実効設定に home_click がある場合のみ、救済として
+          ホームボタンへ 1 回だけ遷移し、再撮影して探索をやり直す
+          (アプリが別画面を開いていて一覧が見えていないケース)。
+          再探索で候補が 1 件見つかれば通常の判定に合流する。
+          クリック失敗時は nav_home_click_failed、再撮影不可は
+          nav_scrutiny_unreadable で停止する。試行は checks の
+          nav_home に残す
+        - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
+          False を返し、self.nav_scrutiny_error に理由を残す
+          (クリックも設定変更もしない。修正クリック失敗時と
+          上記のホーム救済時を除く)
+        - nav_click 未設定で候補 1 件: それを正として通過扱い
+        精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
+        この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
+        talk_list_width_ratio() がアプリ別に解決するため、LINE /
+        Discord の両方で同じ精査が効く。
+        結果は checks の nav_scrutiny に残す。戻り値: 通過なら True。
+        """
+        self.nav_scrutiny_error = None
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        frame, items = self.capture_ocr()
+        if frame is None or not items:
+            self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧を読み取れなかった "
+                    "(撮影・OCR ができず nav_click を精査できない / "
+                    "想定宛先: %s)" % "/".join(aliases),
+                }
+            )
+            return False
+        exact = self._exact_nav_candidates(frame, items, aliases)
+        if not exact:
+            rescued = self._nav_home_rescue(frame, items, aliases)
+            if rescued is None:
+                return False
+            frame, items, exact = rescued
+
+        if not exact:
+            self.nav_scrutiny_error = "nav_recipient_not_found"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が"
+                    "見つからない (部分一致のみは候補にしない)" % "/".join(aliases),
+                }
+            )
+            return False
+        if len(exact) > 1:
+            self.nav_scrutiny_error = "nav_recipient_ambiguous"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が "
+                    "%d 件あり特定できない (何も変更せず停止)"
+                    % ("/".join(aliases), len(exact)),
+                }
+            )
+            return False
+        (cx, cy), row_text = exact[0]
+        nav = self.acfg.get("nav_click")
+        if not nav:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "nav_click 未設定のため、トーク一覧で"
+                    "見つけた宛先 '%s' の行 (%d, %d) を正として通過"
+                    % (row_text, cx, cy),
+                }
+            )
+            return True
+        tolerance = float(
+            self.tunables.get(
+                "nav_scrutiny_row_tolerance_px",
+                DEFAULT_TUNABLES["nav_scrutiny_row_tolerance_px"],
+            )
+        )
+        if abs(cy - int(nav[1])) <= tolerance:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "保存済み nav_click (%d, %d) の行が宛先 "
+                    "'%s' 本人であることを確認 (候補行 (%d, %d) との"
+                    "縦座標差が許容差 %dpx 以内)"
+                    % (int(nav[0]), int(nav[1]), row_text, cx, cy, int(tolerance)),
+                }
+            )
+            return True
+        return self._nav_apply_correction(cx, cy, row_text, nav)
+
     def find_talk_candidates(self, name, frame, items):
         """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
 
@@ -2827,6 +2869,51 @@ class _NavMixin:
             elif target in text_n:
                 partial.append(entry)
         return exact if exact else partial
+
+    def _register_relearned_recipient(self, name, x, y, header_hit, header_match):
+        """再学習で得た宛先を辞書へ登録する (relearn_recipient から分離)。
+
+        登録したエイリアス一覧を返す。config の保存・学習記録・
+        self の宛先状態の更新までをここで行う。"""
+        # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
+        # 前方一致の場合はヘッダ文字列に誤読分が混ざっているため、
+        # エイリアスには指定名だけを使う (完全一致時のみ従来通り
+        # ヘッダで読めた文字列も候補にする)。
+        aliases = [name]
+        header_name = header_hit.strip() if header_match == "exact" else ""
+        if header_name and header_name not in aliases:
+            aliases.append(header_name)
+        entry = {"aliases": aliases, "nav_click": [x, y]}
+        old_recips, old_default = recipients_of(self.app_cfg)
+        recips = dict(old_recips)
+        recips[name] = entry
+        self.app_cfg["recipients"] = recips
+        if not self.app_cfg.get("default_recipient") and old_default:
+            self.app_cfg["default_recipient"] = old_default
+        backup = save_config(self.cfg)
+        append_learned_case(
+            {
+                "at": datetime.now(JST).isoformat(),
+                "app": self.app,
+                "item": "recipient:" + name,
+                "old": None,
+                "new": entry,
+                "reason": "再学習フローで座標を再取得して登録",
+            }
+        )
+        self.recipient_id = name
+        self.recipient_known = True
+        self.acfg = effective_acfg(self.app_cfg, entry)
+        self.acfg["recipient_id"] = name
+        self.checks.append(
+            {
+                "name": "config_saved",
+                "ok": True,
+                "evidence": "宛先 '%s' を辞書へ登録 (nav_click=%s / aliases=%s。"
+                "バックアップ: %s)" % (name, [x, y], aliases, os.path.basename(backup)),
+            }
+        )
+        return aliases
 
     def relearn_recipient(self, name):
         """未知宛先の再学習: 座標の再取得 → 辞書への変数登録。
@@ -2970,43 +3057,8 @@ class _NavMixin:
                 "evidence": header_evidence,
             }
         )
-        # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
-        # 前方一致の場合はヘッダ文字列に誤読分が混ざっているため、
-        # エイリアスには指定名だけを使う (完全一致時のみ従来通り
-        # ヘッダで読めた文字列も候補にする)。
-        aliases = [name]
-        header_name = header_hit.strip() if header_match == "exact" else ""
-        if header_name and header_name not in aliases:
-            aliases.append(header_name)
-        entry = {"aliases": aliases, "nav_click": [x, y]}
-        old_recips, old_default = recipients_of(self.app_cfg)
-        recips = dict(old_recips)
-        recips[name] = entry
-        self.app_cfg["recipients"] = recips
-        if not self.app_cfg.get("default_recipient") and old_default:
-            self.app_cfg["default_recipient"] = old_default
-        backup = save_config(self.cfg)
-        append_learned_case(
-            {
-                "at": datetime.now(JST).isoformat(),
-                "app": self.app,
-                "item": "recipient:" + name,
-                "old": None,
-                "new": entry,
-                "reason": "再学習フローで座標を再取得して登録",
-            }
-        )
-        self.recipient_id = name
-        self.recipient_known = True
-        self.acfg = effective_acfg(self.app_cfg, entry)
-        self.acfg["recipient_id"] = name
-        self.checks.append(
-            {
-                "name": "config_saved",
-                "ok": True,
-                "evidence": "宛先 '%s' を辞書へ登録 (nav_click=%s / aliases=%s。"
-                "バックアップ: %s)" % (name, [x, y], aliases, os.path.basename(backup)),
-            }
+        aliases = self._register_relearned_recipient(
+            name, x, y, header_hit, header_match
         )
         learned = [
             {
@@ -3436,6 +3488,49 @@ class Runner(_CaptureMixin, _ProbeMixin, _HeaderMixin, _NavMixin, _CarefulMixin)
         )
         return cleaned
 
+    def _extend_verify_results(self, ok_multi, error, attempts, aliases, vchecks):
+        """verify の最終集約 (Runner.verify から分離): 複数回判定の結果で
+
+        recipient チェックを置き換えて checks へ積み、全チェックの
+        合否を返す。"""
+        attempts_ev = header_attempts_evidence(attempts)
+        if ok_multi:
+            rec_evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s)" % (
+                len(attempts),
+                attempts_ev,
+            )
+        elif error == "wrong_recipient":
+            rec_evidence = "宛先違いをヘッダで検出 (複数回判定 %d 回: %s)" % (
+                len(attempts),
+                attempts_ev,
+            )
+        else:
+            rec_evidence = (
+                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s)"
+                % (len(attempts), attempts_ev)
+            )
+        aggregated = {
+            "name": "recipient",
+            "ok": ok_multi,
+            "evidence": rec_evidence,
+            "expected": list(aliases),
+            "actual_header": [t for a in attempts for t in (a.get("header") or [])],
+            "attempts": attempts,
+            "recipient_error": error,
+        }
+        final_checks = []
+        replaced = False
+        for c in vchecks:
+            if c.get("name") == "recipient" and not replaced:
+                final_checks.append(aggregated)
+                replaced = True
+            else:
+                final_checks.append(c)
+        if not replaced:
+            final_checks.insert(0, aggregated)
+        self.checks.extend(final_checks)
+        return all(c["ok"] for c in final_checks)
+
     def verify(self, text, mode, fetch_png=False):
         """検閲: 撮影 + OCR 照合。recipient チェックは複数回判定。
 
@@ -3527,43 +3622,7 @@ class Runner(_CaptureMixin, _ProbeMixin, _HeaderMixin, _NavMixin, _CarefulMixin)
                 }
             )
             return False
-        attempts_ev = header_attempts_evidence(attempts)
-        if ok_multi:
-            rec_evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s)" % (
-                len(attempts),
-                attempts_ev,
-            )
-        elif error == "wrong_recipient":
-            rec_evidence = "宛先違いをヘッダで検出 (複数回判定 %d 回: %s)" % (
-                len(attempts),
-                attempts_ev,
-            )
-        else:
-            rec_evidence = (
-                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s)"
-                % (len(attempts), attempts_ev)
-            )
-        aggregated = {
-            "name": "recipient",
-            "ok": ok_multi,
-            "evidence": rec_evidence,
-            "expected": list(aliases),
-            "actual_header": [t for a in attempts for t in (a.get("header") or [])],
-            "attempts": attempts,
-            "recipient_error": error,
-        }
-        final_checks = []
-        replaced = False
-        for c in vchecks:
-            if c.get("name") == "recipient" and not replaced:
-                final_checks.append(aggregated)
-                replaced = True
-            else:
-                final_checks.append(c)
-        if not replaced:
-            final_checks.insert(0, aggregated)
-        self.checks.extend(final_checks)
-        return all(c["ok"] for c in final_checks)
+        return self._extend_verify_results(ok_multi, error, attempts, aliases, vchecks)
 
     def pre_send_once(self, text):
         """送信前の一巡: 入力 → 欄モード検閲。
@@ -3595,6 +3654,55 @@ def read_text(args):
     if args.text is not None:
         return args.text
     raise SystemExit("--text or --text-file is required for this action")
+
+
+def _run_approve_action(args, cfg, t0):
+    """approve アクション: Mac に接続せず承認記録だけを作り、結果を
+    出力して終了する (main から分離。終了コードも従来どおり)。"""
+    text = read_text(args)
+    rid, entry = find_recipient(cfg["apps"][args.app], args.to)
+    if entry is None:
+        # 辞書に無い宛先には承認を作らない (まず careful --to で
+        # 座標を再取得して登録してから承認する)
+        out = {
+            "ok": False,
+            "app": args.app,
+            "action": "approve",
+            "recipient": None,
+            "total_sec": round(time.time() - t0, 2),
+            "recipient_requested": args.to,
+            "error": "unknown_recipient",
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        sys.exit(2)
+    ttl = timedelta(hours=float(tunables(cfg)["approval_ttl_hours"]))
+    rec = create_approval(
+        args.app,
+        effective_acfg(cfg["apps"][args.app], entry),
+        text,
+        expires=args.expires,
+        ttl=ttl,
+    )
+    out = {
+        "ok": True,
+        "app": args.app,
+        "action": "approve",
+        "recipient": rid,
+        "recipient_requested": args.to,
+        "total_sec": round(time.time() - t0, 2),
+        "approval": {
+            "id": rec["text_sha256"][:12],
+            "text_sha256": rec["text_sha256"],
+            "app": rec["app"],
+            "recipient": rec["recipient"],
+            "created_at": rec["created_at"],
+            "expires_at": rec["expires_at"],
+            "used": rec["used"],
+        },
+        "error": None,
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    sys.exit(0)
 
 
 def main():
@@ -3632,50 +3740,7 @@ def main():
 
     # approve は Mac に接続しない (承認記録を作るだけ)。
     if args.action == "approve":
-        text = read_text(args)
-        rid, entry = find_recipient(cfg["apps"][args.app], args.to)
-        if entry is None:
-            # 辞書に無い宛先には承認を作らない (まず careful --to で
-            # 座標を再取得して登録してから承認する)
-            out = {
-                "ok": False,
-                "app": args.app,
-                "action": "approve",
-                "recipient": None,
-                "total_sec": round(time.time() - t0, 2),
-                "recipient_requested": args.to,
-                "error": "unknown_recipient",
-            }
-            print(json.dumps(out, ensure_ascii=False, indent=2))
-            sys.exit(2)
-        ttl = timedelta(hours=float(tunables(cfg)["approval_ttl_hours"]))
-        rec = create_approval(
-            args.app,
-            effective_acfg(cfg["apps"][args.app], entry),
-            text,
-            expires=args.expires,
-            ttl=ttl,
-        )
-        out = {
-            "ok": True,
-            "app": args.app,
-            "action": "approve",
-            "recipient": rid,
-            "recipient_requested": args.to,
-            "total_sec": round(time.time() - t0, 2),
-            "approval": {
-                "id": rec["text_sha256"][:12],
-                "text_sha256": rec["text_sha256"],
-                "app": rec["app"],
-                "recipient": rec["recipient"],
-                "created_at": rec["created_at"],
-                "expires_at": rec["expires_at"],
-                "used": rec["used"],
-            },
-            "error": None,
-        }
-        print(json.dumps(out, ensure_ascii=False, indent=2))
-        sys.exit(0)
+        _run_approve_action(args, cfg, t0)
 
     r = Runner(cfg, args.app, to=args.to)
     ok = True
