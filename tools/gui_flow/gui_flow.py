@@ -1989,7 +1989,1198 @@ def _parse_window(res):
     return win, frame
 
 
-class Runner:
+# --- Runner の内部分割 (C-024) -------------------------------------------
+# Runner 本体が肥大化したため、責務ごとの内部 mixin に分けた。
+# 公開名・シグネチャ・挙動は従来どおりで、Runner が全てを継承する。
+
+
+class _CaptureMixin:
+    """撮影・証跡保存まわり (キュー投入・PNG 取得・OCR 取得・クリック)。"""
+
+    def _capture_via_queue(self, action, build, extras=()):
+        """撮影系フェーズの共通キュー投入 (C-027 で共通化)。
+
+        build はキュー名を受け取ってスクリプト文字列を返す callable。
+        名前付け (_name) と所要計測 (_timed、ラベルは撮影系共通の
+        "capture") をここに集約し、呼び出し側は撮影後の処理だけを持つ。
+        """
+        name = self._name(action)
+        return self._timed(
+            "capture",
+            lambda: self.mac.run_queue(build(name), name, extras=extras),
+        )
+
+    def capture_png(self):
+        """対象ウィンドウを撮影だけし、PNG を last_png_bytes に取り込む。
+
+        単独 send の送信後スクショ用。成功したら True。
+        """
+        res = self._capture_via_queue(
+            "capture",
+            lambda name: build_capture_script(name, self.app, self.acfg),
+            extras=("-png.b64",),
+        )
+        if res.get("status") != "ok":
+            return False
+        self.last_png_bytes = decode_b64_bytes(
+            res.get("_files", {}).get("-png.b64", "")
+        )
+        return self.last_png_bytes is not None
+
+    def store_post_send_screenshot(self):
+        """送信成功後のキャプチャを VM 側の定位置へ保存する。
+
+        last_png_bytes (post の送信後検閲で撮影したもの) があればそれを、
+        無ければ capture_png() で撮り直して (単独 send 用) 保存する。
+        戻り値: 保存先パス or None。結果は checks の 'screenshot' に残す。
+        取得・保存に失敗しても例外は投げない (送信結果は成功のままにする)。
+        """
+        try:
+            if not self.last_png_bytes:
+                self.capture_png()
+            if not self.last_png_bytes:
+                self.checks.append(
+                    {
+                        "name": "screenshot",
+                        "ok": False,
+                        "evidence": "送信後キャプチャを取得できなかった",
+                    }
+                )
+                return None
+            path = save_screenshot_file(self.app, self.last_png_bytes)
+            self.checks.append(
+                {
+                    "name": "screenshot",
+                    "ok": True,
+                    "evidence": "送信後キャプチャを保存: %s" % path,
+                }
+            )
+            return path
+        except Exception as e:  # noqa: BLE001
+            self.checks.append(
+                {
+                    "name": "screenshot",
+                    "ok": False,
+                    "evidence": "スクショ保存に失敗: %s: %s" % (type(e).__name__, e),
+                }
+            )
+            return None
+
+    # --- 慎重モード (careful): 学習の経路 -------------------------------------
+    # 高速パスが対応できないケースを段階的に解決し、学んだ座標・フレームを
+    # config.local.json へ保存して、次回から正常系として処理できるように
+    # する。送信キーは絶対に押さない (自己確認は test と同じ範囲まで)。
+
+    def careful_capture(self, step):
+        """ステップ証拠の撮影。成功したら (保存先パス, フレーム) を返す。
+
+        失敗したら (None, None)。結果は checks の careful_capture に残す。
+        """
+        res = self._capture_via_queue(
+            "capture",
+            lambda name: build_capture_script(name, self.app, self.acfg),
+            extras=("-png.b64",),
+        )
+        if res.get("status") != "ok":
+            self.checks.append(
+                {
+                    "name": "careful_capture",
+                    "ok": False,
+                    "evidence": "ステップ '%s' の撮影不可: status=%s"
+                    % (step, res.get("status", "no_result")),
+                }
+            )
+            return None, None
+        _win, frame = _parse_window(res)
+        if frame:
+            self.last_frame = frame
+        png = decode_b64_bytes(res.get("_files", {}).get("-png.b64", ""))
+        if png is None:
+            self.checks.append(
+                {
+                    "name": "careful_capture",
+                    "ok": False,
+                    "evidence": "ステップ '%s' のキャプチャを取得できなかった" % step,
+                }
+            )
+            return None, frame
+        path = save_careful_capture(self.app, step, png)
+        self.careful_screenshot = path
+        self.checks.append(
+            {
+                "name": "careful_capture",
+                "ok": True,
+                "evidence": "ステップ '%s' の証拠を保存: %s (frame=%s)"
+                % (step, path, frame),
+            }
+        )
+        return path, frame
+
+    def snapshot_thumb(self, ccfg):
+        """画面確認用のサムネイル (PNG bytes)。失敗時は None。"""
+        name = self._name("snapshot")
+        res = self._timed(
+            "snapshot",
+            lambda: self.mac.run_queue(
+                build_snapshot_script(
+                    name, self.app, self.acfg, ccfg["dismiss_thumb_width"]
+                ),
+                name,
+                extras=("-thumb.b64",),
+            ),
+        )
+        if res.get("status") != "ok":
+            return None
+        return decode_b64_bytes(res.get("_files", {}).get("-thumb.b64", ""))
+
+    def capture_ocr(self):
+        """対象ウィンドウを撮影し、(フレーム, OCR items) を返す。
+
+        撮影・OCR ができなければ (None, [])。checks には積まない
+        (呼び出し側が文脈に合ったチェック名で記録する)。
+        """
+        res = self._capture_via_queue(
+            "verify",
+            lambda name: build_verify_script(
+                name, self.app, self.acfg, tun=self.tunables
+            ),
+            extras=("-ocr.txt",),
+        )
+        if res.get("status") != "ok":
+            return None, []
+        _win, frame = _parse_window(res)
+        if frame:
+            self.last_frame = frame
+        return frame, parse_ocr(res.get("_files", {}).get("-ocr.txt", ""))
+
+    def capture_header_runs(self):
+        """対象ウィンドウを撮影し、(フレーム, ヘッダ切り出し run 群) を返す。
+
+        build_verify_script が作るヘッダ帯切り出し OCR
+        (-header-ocr.txt) だけを取得し、その項目を text_runs
+        (merge 間隔は tunables の talk_row_merge_px) で run 化する。
+        全体 OCR (-ocr.txt) は取得も判定もしない。撮影ができなければ
+        (None, [])、切り出しファイルが無い・空なら (フレーム, [])。
+        checks には積まない (capture_ocr と同じ作法)。last_frame の
+        更新も capture_ocr と同様に行う。戻り値 (フレーム, runs) は
+        従来通りで、parse した項目は self._last_header_items にも
+        保持する (候補拡張が有効なアプリで項目候補を作るため)。
+        """
+        self._last_header_items = []
+        res = self._capture_via_queue(
+            "verify",
+            lambda name: build_verify_script(
+                name, self.app, self.acfg, tun=self.tunables
+            ),
+            extras=("-header-ocr.txt",),
+        )
+        if res.get("status") != "ok":
+            return None, []
+        _win, frame = _parse_window(res)
+        if frame:
+            self.last_frame = frame
+        items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
+        self._last_header_items = items
+        return frame, text_runs(items, float(self.tunables["talk_row_merge_px"]))
+
+    def click_point(self, point):
+        """指定点を 1 回クリックする (前面化つき)。送信キーは送らない。"""
+        name = self._name("click")
+        res = self._timed(
+            "click",
+            lambda: self.mac.run_queue(
+                build_click_script(name, self.app, self.acfg, point), name
+            ),
+        )
+        return res.get("status") == "ok"
+
+
+class _ProbeMixin:
+    """慎重モードの探査 (入力欄候補の試行とオーバーレイ解消)。"""
+
+    def probe(self, candidates, ccfg):
+        """候補点を一括プローブし、フォーカスが当たった点を返す。
+
+        戻り値: dict (status / hit_index / point / tried / field_empty_after)。
+        送信キーは送らない。結果は checks の probe に残す。
+        """
+        name = self._name("probe")
+        res = self._timed(
+            "probe",
+            lambda: self.mac.run_queue(
+                build_probe_script(
+                    name, self.app, self.acfg, candidates, ccfg["probe_text"]
+                ),
+                name,
+                extras=("-leftover.txt",),
+            ),
+        )
+        st = res.get("status", "no_result")
+        out = {
+            "status": st,
+            "hit_index": int(res.get("probe_hit", "-1")),
+            "point": None,
+            "tried": int(res.get("probe_tried", "0")),
+            "field_empty_after": res.get("field_empty_after") == "yes",
+        }
+        if res.get("probe_point"):
+            xy = res["probe_point"].split()
+            if len(xy) == 2:
+                out["point"] = (int(float(xy[0])), int(float(xy[1])))
+        if st == "anomaly_leftover":
+            left = res.get("_files", {}).get("-leftover.txt", "")
+            ev = "欄に残りあり (何も触らず停止): %s" % left.strip()[:80]
+        elif st == "ok" and out["point"] is not None:
+            ev = "候補 %d 点中 %d 点目 %s でフォーカス確認" % (
+                out["tried"],
+                out["hit_index"] + 1,
+                out["point"],
+            )
+        else:
+            ev = "候補 %d 点すべてフォーカスせず (status=%s)" % (out["tried"], st)
+        self.checks.append(
+            {
+                "name": "probe",
+                "ok": st == "ok" and out["point"] is not None,
+                "evidence": ev,
+            }
+        )
+        self.checks.append(
+            {
+                "name": "probe_field_empty",
+                "ok": out["field_empty_after"],
+                "evidence": (
+                    "プローブ後、入力欄は空 (センチネル確認)"
+                    if out["field_empty_after"]
+                    else "プローブ後、入力欄が空に戻っていない"
+                ),
+            }
+        )
+        return out
+
+    def dismiss_overlay(self, frame, ccfg):
+        """想定外の覆いの汎用解消 (Esc + 外側クリック) を試みる。
+
+        スクリプトが完走したら True。解消できたか自体の判定は、この後の
+        再プローブに委ねる。結果は checks の overlay_dismiss に残す。
+        """
+        name = self._name("dismiss")
+        res = self._timed(
+            "dismiss",
+            lambda: self.mac.run_queue(
+                build_dismiss_script(name, self.app, self.acfg, frame, ccfg),
+                name,
+            ),
+        )
+        st = res.get("status", "no_result")
+        self.checks.append(
+            {
+                "name": "overlay_dismiss",
+                "ok": st == "ok",
+                "evidence": "汎用解消 (Esc + 外側クリック) を実行: status=%s" % st,
+            }
+        )
+        return st == "ok"
+
+    def _probe_after_dismiss(self, candidates, frame, ccfg, res):
+        """分類→対処: 覆いの疑い (probe_no_hit) への対処。
+
+        対処は「汎用解消 → 画面がクリーンになったかの再確認 (解消前後の
+        サムネイル差分) → 再プローブ」。再確認で変化が無ければ覆いが
+        残っているとみなし、再プローブせず停止側に落とす。試行回数は
+        dismiss_retries で上限を設ける (無限ループ防止)。解消できれば
+        解消後のプローブ結果を返し、できなければ overlay_blocked を
+        立てて最後の結果を返す (無理に進めない)。
+        """
+        self.checks.append(
+            {
+                "name": "anomaly_class",
+                "ok": True,
+                "evidence": "異常の種類: 覆いの疑い (入力欄に到達できず) "
+                "→ 対処: 汎用解消 + 再確認 + 再プローブ",
+            }
+        )
+        for _ in range(max(0, int(ccfg["dismiss_retries"]))):
+            before = self.snapshot_thumb(ccfg)
+            if not self.dismiss_overlay(frame, ccfg):
+                break
+            self.careful_capture("overlay-dismissed")
+            after = self.snapshot_thumb(ccfg)
+            ratio = (
+                png_diff_ratio(before, after)
+                if before is not None and after is not None
+                else None
+            )
+            if ratio is not None:
+                clean = ratio > float(ccfg["dismiss_change_threshold"])
+                self.checks.append(
+                    {
+                        "name": "overlay_clean",
+                        "ok": clean,
+                        "evidence": "解消前後の画面差分 %.4f (しきい値 %.4f): %s"
+                        % (
+                            ratio,
+                            float(ccfg["dismiss_change_threshold"]),
+                            (
+                                "変化あり (クリーンと確認)"
+                                if clean
+                                else "変化なし (覆いが残っている疑い)"
+                            ),
+                        ),
+                    }
+                )
+                if not clean:
+                    break
+            res = self.probe(candidates, ccfg)
+            if res["status"] != "probe_no_hit":
+                break
+        if res["status"] == "ok" and res["point"] is not None:
+            self.checks.append(
+                {
+                    "name": "overlay",
+                    "ok": True,
+                    "evidence": "覆いを解消し、再プローブで入力欄に到達できた",
+                }
+            )
+        elif res["status"] == "probe_no_hit":
+            self.overlay_blocked = True
+            self.checks.append(
+                {
+                    "name": "overlay",
+                    "ok": False,
+                    "evidence": "汎用解消を試みても入力欄に到達できず停止 "
+                    "(想定外の覆いが残っている疑い。無理に進めない)",
+                }
+            )
+        return res
+
+
+class _HeaderMixin:
+    """宛先ヘッダの照合 (候補拡張・複数試行の判定・幅比率)。"""
+
+    def other_recipient_formal_names(self):
+        """宛先以外の登録済み宛先の正式名リスト (OTHER 判定用)。
+
+        アプリ設定の recipients 辞書から取る (formal_names_of_others)。
+        旧形式 (宛先 1 件だけ) の config では空になる。
+        """
+        recips, _default = recipients_of(self.app_cfg)
+        return formal_names_of_others(recips, self.recipient_id)
+
+    def header_candidate_expansion_enabled(self):
+        """ヘッダ候補拡張がこのアプリで有効か (config 駆動)。
+
+        apps.<app> 配下の header_candidate_expansion が真の場合のみ
+        有効。アプリ名のハードコードや文字列内容による分岐はしない。
+        実効設定 (self.acfg) 側にキーがあればそちらも見る。
+        """
+        for cfg in (self.app_cfg, self.acfg):
+            if cfg and cfg.get(HEADER_CANDIDATE_EXPANSION_KEY):
+                return True
+        return False
+
+    def _header_candidates(self, runs, items=None):
+        """宛先判定に渡す候補群を返す。
+
+        候補拡張が有効なアプリでのみ expand_header_candidates で
+        拡張する。無効なアプリ (LINE を含む) では runs をそのまま
+        (同一のオブジェクト・順序・内容で) 返すため、classify に
+        渡る run 群は現行と完全に同一になる。
+        """
+        if not self.header_candidate_expansion_enabled():
+            return runs
+        return expand_header_candidates(runs, items)
+
+    def _judge_header_multi(self, attempt_fn):
+        """ヘッダ複数回判定の共有ドライバ。
+
+        attempt_fn() は 1 回撮影し直して、classify_header_attempt の
+        結果に "header" (その回のヘッダ run 文字列リスト) を加えた
+        dict を返す。各回は必ず撮り直す (前回の画像・OCR の使い回し
+        禁止)。最大で tunables の header_check_attempts 回まで撮影し、
+        撮影と撮影の間には header_check_interval_sec 秒を
+        time.sleep で空ける。総合判定:
+        - OTHER が 1 回でも出たら残りの撮影をせず即失敗
+          (error="wrong_recipient")
+        - N 回撮り終えて OTHER 無し・MATCH 1 回以上で合格
+        - 全部 UNREADABLE なら「確認できず」で失敗
+          (error="recipient_header_unreadable"、wrong_recipient と区別)
+        MATCH が出ても早期終了はしない (打ち切るのは OTHER だけ)。
+        戻り値: (ok, error, attempts)。
+        """
+        n = int(
+            self.tunables.get(
+                "header_check_attempts", DEFAULT_TUNABLES["header_check_attempts"]
+            )
+        )
+        interval = float(
+            self.tunables.get(
+                "header_check_interval_sec",
+                DEFAULT_TUNABLES["header_check_interval_sec"],
+            )
+        )
+        attempts = []
+        for i in range(max(1, n)):
+            if i > 0:
+                time.sleep(interval)
+            att = dict(attempt_fn())
+            att["attempt"] = i + 1
+            attempts.append(att)
+            if att["classification"] == "OTHER":
+                break
+        if any(a["classification"] == "OTHER" for a in attempts):
+            return False, "wrong_recipient", attempts
+        if any(a["classification"] == "MATCH" for a in attempts):
+            return True, None, attempts
+        return False, "recipient_header_unreadable", attempts
+
+    def check_recipient_header(self):
+        """入力前に、開いたトークのヘッダだけで宛先を確認する。
+
+        nav_click があればその行をクリックして開いてから、複数回
+        判定 (共有ドライバ _judge_header_multi) で、各回の撮影ごとに
+        capture_header_runs() が返すヘッダ帯切り出し OCR の run 群
+        だけを宛先エイリアスと照合する (全体 OCR からヘッダ領域を
+        座標で拾う方式は使わない)。トーク一覧に写った名前では
+        合格しない。各回の分類は MATCH / OTHER / UNREADABLE の 3 値で、
+        evidence と構造化フィールド (attempts) に各回のヘッダ文字列と
+        分類を残す。
+        戻り値: 合格したら True。結果は checks の recipient_header
+        に残す。OTHER (別人) の場合は self.wrong_recipient
+        (cleaned=False: まだ何も入力していないため消すものは無い) と
+        self.recipient_header_error="wrong_recipient" を残す。
+        全部 UNREADABLE (撮影・OCR ができない場合を含む) は
+        recipient_header_error="recipient_header_unreadable" として
+        False を返す (wrong_recipient とは区別する)。
+        """
+        self.recipient_header_error = None
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        nav = self.acfg.get("nav_click")
+        if nav:
+            if not self.click_point(nav):
+                self.recipient_header_error = "recipient_header_unreadable"
+                self.checks.append(
+                    {
+                        "name": "recipient_header",
+                        "ok": False,
+                        "evidence": "宛先のトークを開けなかった "
+                        "(nav_click=%s のクリック失敗 / 想定宛先: %s)"
+                        % (list(nav), "/".join(aliases)),
+                    }
+                )
+                return False
+        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
+        other_names = self.other_recipient_formal_names()
+
+        def attempt_fn():
+            frame, runs = self.capture_header_runs()
+            if frame is None or not runs:
+                return {
+                    "classification": "UNREADABLE",
+                    "kind": None,
+                    "extra": 0,
+                    "run_text": None,
+                    "matched": None,
+                    "header": [],
+                }
+            candidates = self._header_candidates(
+                runs, getattr(self, "_last_header_items", None)
+            )
+            att = classify_header_attempt(
+                candidates, aliases, other_names, prefix_max_extra=max_extra
+            )
+            # 証跡の header は実際の OCR run のまま (拡張候補は混ぜない)
+            att["header"] = [text for _point, text in runs]
+            return att
+
+        ok, error, attempts = self._judge_header_multi(attempt_fn)
+        attempts_ev = header_attempts_evidence(attempts)
+        if ok:
+            evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s / 想定宛先: %s)" % (
+                len(attempts),
+                attempts_ev,
+                "/".join(aliases),
+            )
+        elif error == "wrong_recipient":
+            evidence = (
+                "宛先違いをヘッダで検出 (複数回判定 %d 回: %s / 想定宛先: %s)"
+                % (len(attempts), attempts_ev, "/".join(aliases))
+            )
+        else:
+            evidence = (
+                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s / "
+                "想定宛先: %s)" % (len(attempts), attempts_ev, "/".join(aliases))
+            )
+        self.checks.append(
+            {
+                "name": "recipient_header",
+                "ok": ok,
+                "evidence": evidence,
+                "expected": list(aliases),
+                "actual_header": [t for a in attempts for t in (a.get("header") or [])],
+                "attempts": attempts,
+                "recipient_error": error,
+            }
+        )
+        if not ok:
+            self.recipient_header_error = error
+            if error == "wrong_recipient":
+                other_att = next(a for a in attempts if a["classification"] == "OTHER")
+                self.wrong_recipient = {
+                    "expected": list(aliases),
+                    "actual_header": list(other_att.get("header") or []),
+                    "cleaned": False,
+                }
+            return False
+        return True
+
+    def _text_runs(self, items):
+        """OCR 項目を行単位の run にまとめる (共有ヘルパーへの委譲)。
+
+        規則はモジュールレベルの text_runs と同じで、merge 間隔は
+        tunables の talk_row_merge_px を使う。
+        """
+        return text_runs(items, float(self.tunables["talk_row_merge_px"]))
+
+    def talk_list_width_ratio(self):
+        """トーク一覧とみなす横範囲 (窓幅比) をアプリ別に解決する。
+
+        apps.<app> の talk_list_width_ratio があればそれを優先し、
+        無ければ共通 tunables の値 (既定 0.32) を使う。一覧の幅は
+        アプリのレイアウト依存 (例: LINE の一覧は窓幅の約26%で、共通値
+        0.32 では開いた先のヘッダ名まで一覧側に含めてしまい、ヘッダ
+        確認が常時失敗する) のため、アプリ別の上書きを可能にする。
+        """
+        return float(resolve_talk_list_width_ratio(self.app_cfg, self.tunables))
+
+
+class _NavMixin:
+    """トーク一覧の精査と宛先座標の再学習。"""
+
+    def _exact_nav_candidates(self, frame, items, aliases):
+        """トーク一覧の OCR から、宛先エイリアスのいずれかと完全一致する
+        行の候補を (point, text) のリストで返す (座標の重複は除く)。
+
+        scrutinize_nav の探索規則そのもの。ホーム遷移リトライ後の
+        再探索でも同じ規則を使うため、切り出して共有する。
+        """
+        exact = []
+        seen_points = set()
+        for alias in aliases:
+            for x, y, text in self.find_talk_candidates(alias, frame, items):
+                if not any(norm(text) == norm(a) for a in aliases):
+                    continue
+                point = (int(x), int(y))
+                if point in seen_points:
+                    continue
+                seen_points.add(point)
+                exact.append((point, text))
+        return exact
+
+    def scrutinize_nav(self):
+        """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
+        行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
+
+        一覧の並び替えで保存座標が別人の行を指すようになっている場合に、
+        その座標で開いてしまう事故を防ぐ前段ゲート。宛先エイリアス
+        ごとに find_talk_candidates で一覧探索し (再学習と同じ規則)、
+        返ってきた候補のうちエイリアスのいずれかと完全一致するもの
+        だけを「完全一致候補」とする (部分一致のみは候補に数えない)。
+        行の同一性は縦座標で判定する (横は一覧領域内であることが
+        候補の条件で担保される)。許容差は tunables の
+        nav_scrutiny_row_tolerance_px。
+
+        - 候補 1 件かつ保存座標と同じ行: 通過 (クリック・保存なし)
+        - 候補 1 件だが保存座標と違う行: その行をクリックして開き、
+          recipients 辞書の nav_click を候補座標へ更新して保存する
+          (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
+          同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
+          入力が新しい座標を使うようにする
+        - 候補 0 件で実効設定に home_click がある場合のみ、救済として
+          ホームボタンへ 1 回だけ遷移し、再撮影して探索をやり直す
+          (アプリが別画面を開いていて一覧が見えていないケース)。
+          再探索で候補が 1 件見つかれば通常の判定に合流する。
+          クリック失敗時は nav_home_click_failed、再撮影不可は
+          nav_scrutiny_unreadable で停止する。試行は checks の
+          nav_home に残す
+        - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
+          False を返し、self.nav_scrutiny_error に理由を残す
+          (クリックも設定変更もしない。修正クリック失敗時と
+          上記のホーム救済時を除く)
+        - nav_click 未設定で候補 1 件: それを正として通過扱い
+        精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
+        この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
+        talk_list_width_ratio() がアプリ別に解決するため、LINE /
+        Discord の両方で同じ精査が効く。
+        結果は checks の nav_scrutiny に残す。戻り値: 通過なら True。
+        """
+        self.nav_scrutiny_error = None
+        aliases = list(self.acfg.get("recipient_aliases", []))
+        frame, items = self.capture_ocr()
+        if frame is None or not items:
+            self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧を読み取れなかった "
+                    "(撮影・OCR ができず nav_click を精査できない / "
+                    "想定宛先: %s)" % "/".join(aliases),
+                }
+            )
+            return False
+        exact = self._exact_nav_candidates(frame, items, aliases)
+        if not exact:
+            home = self.acfg.get("home_click")
+            if home:
+                # 救済: アプリが別画面 (Discord のサーバー画面など) を開いて
+                # いて DM 一覧が見えていないケース。ホームボタンへ 1 回だけ
+                # 遷移して再探索する。クリックは最大 1 回で、文字入力・
+                # 送信キーは行わない。home_click 未設定なら従来どおり
+                # この救済は発動せず、そのまま未検出で停止する。
+                home_point = tuple(int(v) for v in home)
+                if self.click_point(home_point) is False:
+                    self.checks.append(
+                        {
+                            "name": "nav_home",
+                            "ok": False,
+                            "evidence": "ホームボタン (%d, %d) をクリック"
+                            "できなかったため、再探索せず停止" % home_point,
+                        }
+                    )
+                    self.nav_scrutiny_error = "nav_home_click_failed"
+                    self.checks.append(
+                        {
+                            "name": "nav_scrutiny",
+                            "ok": False,
+                            "evidence": "ホーム遷移のクリックに失敗したため"
+                            " nav_click を精査できない (想定宛先: %s)"
+                            % "/".join(aliases),
+                        }
+                    )
+                    return False
+                frame, items = self.capture_ocr()
+                if frame is None or not items:
+                    self.checks.append(
+                        {
+                            "name": "nav_home",
+                            "ok": False,
+                            "evidence": "ホーム遷移後のトーク一覧を"
+                            "読み取れなかった (撮影・OCR 不可)",
+                        }
+                    )
+                    self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+                    self.checks.append(
+                        {
+                            "name": "nav_scrutiny",
+                            "ok": False,
+                            "evidence": "ホーム遷移後にトーク一覧を"
+                            "読み取れなかった (撮影・OCR ができず "
+                            "nav_click を精査できない / 想定宛先: %s)"
+                            % "/".join(aliases),
+                        }
+                    )
+                    return False
+                exact = self._exact_nav_candidates(frame, items, aliases)
+                self.checks.append(
+                    {
+                        "name": "nav_home",
+                        "ok": bool(exact),
+                        "evidence": "ホームボタン (%d, %d) へ遷移して"
+                        "再探索した (完全一致候補 %d 件)"
+                        % (home_point + (len(exact),)),
+                    }
+                )
+        if not exact:
+            self.nav_scrutiny_error = "nav_recipient_not_found"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が"
+                    "見つからない (部分一致のみは候補にしない)" % "/".join(aliases),
+                }
+            )
+            return False
+        if len(exact) > 1:
+            self.nav_scrutiny_error = "nav_recipient_ambiguous"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が "
+                    "%d 件あり特定できない (何も変更せず停止)"
+                    % ("/".join(aliases), len(exact)),
+                }
+            )
+            return False
+        (cx, cy), row_text = exact[0]
+        nav = self.acfg.get("nav_click")
+        if not nav:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "nav_click 未設定のため、トーク一覧で"
+                    "見つけた宛先 '%s' の行 (%d, %d) を正として通過"
+                    % (row_text, cx, cy),
+                }
+            )
+            return True
+        tolerance = float(
+            self.tunables.get(
+                "nav_scrutiny_row_tolerance_px",
+                DEFAULT_TUNABLES["nav_scrutiny_row_tolerance_px"],
+            )
+        )
+        if abs(cy - int(nav[1])) <= tolerance:
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": True,
+                    "evidence": "保存済み nav_click (%d, %d) の行が宛先 "
+                    "'%s' 本人であることを確認 (候補行 (%d, %d) との"
+                    "縦座標差が許容差 %dpx 以内)"
+                    % (int(nav[0]), int(nav[1]), row_text, cx, cy, int(tolerance)),
+                }
+            )
+            return True
+        # 不一致: 保存座標が別人の行を指している。探索で見つけた
+        # 本人の行を開き、nav_click をその座標へ更新して保存する。
+        old_nav = [int(nav[0]), int(nav[1])]
+        new_nav = [cx, cy]
+        if self.click_point((cx, cy)) is False:
+            self.nav_scrutiny_error = "nav_scrutiny_click_failed"
+            self.checks.append(
+                {
+                    "name": "nav_scrutiny",
+                    "ok": False,
+                    "evidence": "宛先 '%s' の行 (%d, %d) をクリック"
+                    "できなかったため、nav_click を更新せず停止" % (row_text, cx, cy),
+                }
+            )
+            return False
+        recips = self.app_cfg.get("recipients") or {}
+        if self.recipient_id is not None and self.recipient_id in recips:
+            recips[self.recipient_id]["nav_click"] = list(new_nav)
+        else:
+            # 旧形式 (アプリ直下の nav_click) の config への後方互換
+            self.app_cfg["nav_click"] = list(new_nav)
+        self.acfg["nav_click"] = list(new_nav)
+        backup = save_config(self.cfg)
+        append_learned_case(
+            {
+                "at": datetime.now(JST).isoformat(),
+                "app": self.app,
+                "item": "recipient_nav_click:" + str(self.recipient_id),
+                "old": old_nav,
+                "new": list(new_nav),
+                "reason": "nav 精査で保存座標が別人の行を指していたため、"
+                "一覧探索で見つけた宛先本人の行へ更新",
+            }
+        )
+        backup_note = (
+            "バックアップ: %s" % os.path.basename(backup) if backup else "保存済み"
+        )
+        self.checks.append(
+            {
+                "name": "nav_scrutiny",
+                "ok": True,
+                "evidence": "保存座標 (%d, %d) が別人の行を指していたため、"
+                "探索で見つけた宛先 '%s' の行 (%d, %d) に nav_click を"
+                "更新した (旧 %s → 新 %s / %s)"
+                % (
+                    old_nav[0],
+                    old_nav[1],
+                    row_text,
+                    cx,
+                    cy,
+                    old_nav,
+                    new_nav,
+                    backup_note,
+                ),
+            }
+        )
+        return True
+
+    def find_talk_candidates(self, name, frame, items):
+        """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
+
+        戻り値: [(click_x, click_y, ocr_text), ...]。
+        判定は行の中の連続した文字列単位で行い (名前と人数表記が別
+        項目に割れていれば連結した文字列で見る)、完全一致する文字列
+        があればそれだけを、無ければ名前を含む文字列を候補にする。
+        クリック点は画面絶対座標。
+        """
+        target = norm(name)
+        if not target or not frame:
+            return []
+        fx, fy, fw, _fh = (int(v) for v in frame)
+        limit_x = fw * self.talk_list_width_ratio()
+        in_list = [it for it in items if it["x"] <= limit_x and norm(it["text"])]
+        exact, partial = [], []
+        for (px, py), text in self._text_runs(in_list):
+            text_n = norm(text)
+            entry = (int(fx + px), int(fy + py), text)
+            if text_n == target:
+                exact.append(entry)
+            elif target in text_n:
+                partial.append(entry)
+        return exact if exact else partial
+
+    def relearn_recipient(self, name):
+        """未知宛先の再学習: 座標の再取得 → 辞書への変数登録。
+
+        流れ: 画面を撮影し、トーク一覧から指定名の行を探す → その行の
+        座標をクリックして開く → 開いた先のヘッダの宛名が指定名と
+        一致するか OCR で確認する → 一致したら、その座標 (nav_click) と
+        照合用エイリアスを config の recipients 辞書へ新しい変数として
+        登録する (書き込み前にバックアップ + 学習記録へ追記)。
+        見つからない / 同じ名前の行が複数ある・名前と完全一致する行が
+        無く部分一致のみ (グループ名等の可能性) で特定できない /
+        ヘッダが完全一致しない場合は、何も登録せず停止する。戻り値:
+        (ok, learned_entries)。失敗理由は self.relearn_error に残す。
+        """
+        name = str(name).strip()
+        target = norm(name)
+        frame, items = self.capture_ocr()
+        if frame is None:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "画面を撮影できず、トーク一覧を探せなかった",
+                }
+            )
+            self.relearn_error = "recipient_search_failed"
+            return False, []
+        cands = self.find_talk_candidates(name, frame, items)
+        if not cands:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' が見つからない" % name,
+                }
+            )
+            self.careful_capture("recipient-not-found")
+            self.relearn_error = "recipient_not_found"
+            return False, []
+        if len(cands) > 1:
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' と読める行が %d 件あり特定できない"
+                    " (同名・グループ等の可能性。何も登録せず停止)"
+                    % (name, len(cands)),
+                }
+            )
+            self.careful_capture("recipient-ambiguous")
+            self.relearn_error = "recipient_ambiguous"
+            return False, []
+        if norm(cands[0][2]) != target:
+            # 完全一致の行が無く、名前を含むだけの行が 1 件だけある。
+            # より長い名前の一部か、グループ名 (「○○と他2名」等) の
+            # 可能性があり特定できないため、曖昧として登録せず停止する。
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク一覧に '%s' と完全一致する行がなく、"
+                    "部分一致のみ (%s)。グループ等の可能性があるため"
+                    "特定できず、何も登録せず停止" % (name, cands[0][2]),
+                }
+            )
+            self.careful_capture("recipient-ambiguous")
+            self.relearn_error = "recipient_ambiguous"
+            return False, []
+        x, y, _row_text = cands[0]
+        self.checks.append(
+            {
+                "name": "recipient_search",
+                "ok": True,
+                "evidence": "トーク一覧で '%s' の行の座標を再取得 (%d, %d)"
+                % (name, x, y),
+            }
+        )
+        if not self.click_point((x, y)):
+            self.checks.append(
+                {
+                    "name": "recipient_search",
+                    "ok": False,
+                    "evidence": "トーク行 (%d, %d) をクリックできなかった" % (x, y),
+                }
+            )
+            self.relearn_error = "recipient_search_failed"
+            return False, []
+        _frame2, items2 = self.capture_ocr()
+        header_limit = float(self.tunables["relearn_header_max_y"])
+        # ヘッダ確認は、開いたトーク側の領域 (トーク一覧より右) に
+        # 限定する。一覧は開いた後も左に残るため、帯の縦範囲だけで
+        # 見ると一覧側の名前で合格してしまう。判定は行の中の連続した
+        # 文字列単位で行う。一致条件は完全一致、または「指定名で始まり
+        # 余りが relearn_header_prefix_max_extra 文字以内」の前方一致。
+        # ヘッダ名の右にあるアイコンが OCR で名前の後ろに連結される
+        # 誤読 (例「<名前>4呼」) を吸収するための緩和で、領域スコープと
+        # 一覧側の完全一致 (クリック前に確定) が安全側の担保になる。
+        # この判定はアプリ共通経路であり、LINE / Discord の両方に効く。
+        fw2 = (_frame2 or frame)[2]
+        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
+        header_runs = header_region_runs(
+            items2,
+            fw2,
+            self.talk_list_width_ratio(),
+            header_limit,
+            float(self.tunables["talk_row_merge_px"]),
+        )
+        kind, extra, run_text, _alias = header_alias_match(
+            header_runs, [target], prefix_max_extra=max_extra
+        )
+        header_hit = norm(run_text) if kind else None
+        header_match = kind  # "exact" | "prefix" | None
+        header_extra = extra if kind else 0
+        if header_hit is None:
+            self.checks.append(
+                {
+                    "name": "recipient_header",
+                    "ok": False,
+                    "evidence": "開いた先のヘッダに '%s' が見当たらない"
+                    " (完全一致・前方一致 (余り%d文字以内) のいずれでも"
+                    "一致せず、何も登録せず停止)" % (name, max_extra),
+                }
+            )
+            self.careful_capture("recipient-header-mismatch")
+            self.relearn_error = "recipient_header_mismatch"
+            return False, []
+        if header_match == "exact":
+            header_evidence = (
+                "開いた先のヘッダで宛名 '%s' を確認 (一致方式: exact)" % header_hit
+            )
+        else:
+            header_evidence = (
+                "開いた先のヘッダで宛名 '%s' を確認"
+                " (一致方式: prefix、ヘッダ文字列 '%s'、余り%d文字)"
+                % (name, header_hit, header_extra)
+            )
+        self.checks.append(
+            {
+                "name": "recipient_header",
+                "ok": True,
+                "evidence": header_evidence,
+            }
+        )
+        # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
+        # 前方一致の場合はヘッダ文字列に誤読分が混ざっているため、
+        # エイリアスには指定名だけを使う (完全一致時のみ従来通り
+        # ヘッダで読めた文字列も候補にする)。
+        aliases = [name]
+        header_name = header_hit.strip() if header_match == "exact" else ""
+        if header_name and header_name not in aliases:
+            aliases.append(header_name)
+        entry = {"aliases": aliases, "nav_click": [x, y]}
+        old_recips, old_default = recipients_of(self.app_cfg)
+        recips = dict(old_recips)
+        recips[name] = entry
+        self.app_cfg["recipients"] = recips
+        if not self.app_cfg.get("default_recipient") and old_default:
+            self.app_cfg["default_recipient"] = old_default
+        backup = save_config(self.cfg)
+        append_learned_case(
+            {
+                "at": datetime.now(JST).isoformat(),
+                "app": self.app,
+                "item": "recipient:" + name,
+                "old": None,
+                "new": entry,
+                "reason": "再学習フローで座標を再取得して登録",
+            }
+        )
+        self.recipient_id = name
+        self.recipient_known = True
+        self.acfg = effective_acfg(self.app_cfg, entry)
+        self.acfg["recipient_id"] = name
+        self.checks.append(
+            {
+                "name": "config_saved",
+                "ok": True,
+                "evidence": "宛先 '%s' を辞書へ登録 (nav_click=%s / aliases=%s。"
+                "バックアップ: %s)" % (name, [x, y], aliases, os.path.basename(backup)),
+            }
+        )
+        learned = [
+            {
+                "item": "recipient",
+                "old": None,
+                "new": {"id": name, "aliases": aliases, "nav_click": [x, y]},
+                "reason": "再学習フローで座標を再取得して登録",
+            }
+        ]
+        return True, learned
+
+
+class _CarefulMixin:
+    """慎重モード (careful) の入口と本体。"""
+
+    def careful(self, to_name=None):
+        """慎重モード本体。戻り値: (ok, learned, self_check_ok)。
+
+        to_name に辞書に無い宛先が指定されていたら、先に再学習フロー
+        (座標の再取得 → 辞書への変数登録) を行い、登録できたら通常の
+        慎重モード本体 (座標の探索・保存・自己確認) へ進む。登録
+        できなければ何も登録せず停止する。
+        """
+        learned = []
+        if to_name and not self.recipient_known:
+            ok_rel, entries = self.relearn_recipient(to_name)
+            learned.extend(entries)
+            if not ok_rel:
+                return False, learned, False
+        body_ok, body_learned, self_check_ok = self._careful_body()
+        learned.extend(body_learned)
+        return body_ok, learned, self_check_ok
+
+    def _careful_body(self):
+        """慎重モード本体 (座標の探索と学習)。戻り値は careful と同じ。
+
+        learned は {"item", "old", "new", "reason"} のリスト。学習した値は
+        config.local.json へ保存 (バックアップ + 学習記録の追記) し、
+        仕上げに固定文での自己確認 (入力 → 検閲 → 空に戻す) で正常系へ
+        戻ったことを証明する。
+        """
+        learned = []
+        ccfg = careful_cfg(self.app, self.acfg)
+        tol = int(ccfg["frame_tolerance"])
+        evidence_ok = True  # ステップ証拠が全て保存できたか (合否に連動させる)
+
+        # 1) ウィンドウのフレーム取得 + 学習済みフレームとの比較
+        win_path, frame = self.careful_capture("window")
+        if frame is None:
+            return False, learned, False
+        evidence_ok = evidence_ok and win_path is not None
+        old_frame = self.acfg.get("learned_frame")
+        drift = frame_drift(old_frame, frame)
+        self.checks.append(
+            {
+                "name": "frame_compare",
+                "ok": True,
+                "evidence": (
+                    "学習済みフレームなし (今回を基準として記録)"
+                    if old_frame is None
+                    else "フレーム差 %s (許容差 %dpx): 学習 %s → 現在 %s"
+                    % (drift, tol, old_frame, list(frame))
+                ),
+            }
+        )
+
+        # 2) 入力欄の探索 (現行座標 → グリッド候補の順)
+        candidates = probe_candidates(frame, self.acfg, ccfg)
+        self.checks.append(
+            {
+                "name": "probe_candidates",
+                "ok": True,
+                "evidence": "候補 %d 点を生成 (先頭は学習済み座標)" % len(candidates),
+            }
+        )
+        res = self.probe(candidates, ccfg)
+        if res["status"] == "probe_no_hit":
+            # 入力欄に到達できない = 想定外の覆いの疑い。汎用解消を試す。
+            # (欄の残り anomaly_leftover は従来通り何も触らず停止する)
+            res = self._probe_after_dismiss(candidates, frame, ccfg, res)
+        if res["status"] != "ok" or res["point"] is None:
+            self.careful_capture("probe-failed")
+            return False, learned, False
+        if not res["field_empty_after"]:
+            return False, learned, False
+        probe_path, _ = self.careful_capture("probe")
+        evidence_ok = evidence_ok and probe_path is not None
+
+        # 3) 学習の保存 (必要な場合のみ)
+        hit = [int(res["point"][0]), int(res["point"][1])]
+        old_click = [int(v) for v in self.acfg.get("input_click", [])]
+        if hit != old_click:
+            learned.append(
+                {
+                    "item": "input_click",
+                    "old": old_click,
+                    "new": hit,
+                    "reason": "プローブでフォーカスが当たった候補 (候補 %d 点目)"
+                    % (res["hit_index"] + 1),
+                }
+            )
+        if old_frame is None or (drift is not None and drift > tol):
+            learned.append(
+                {
+                    "item": "learned_frame",
+                    "old": old_frame,
+                    "new": [int(v) for v in frame],
+                    "reason": (
+                        "基準フレームの新規記録"
+                        if old_frame is None
+                        else "フレーム差 %dpx が許容差 %dpx を超過" % (drift, tol)
+                    ),
+                }
+            )
+        if learned:
+            for entry in learned:
+                self.acfg[entry["item"]] = entry["new"]
+                # 実効設定 (self.acfg) はコピーなので、保存対象の実体
+                # (アプリ設定) にも同じ値を書く
+                self.app_cfg[entry["item"]] = entry["new"]
+            backup = save_config(self.cfg)
+            now_iso = datetime.now(JST).isoformat()
+            for entry in learned:
+                append_learned_case(
+                    {
+                        "at": now_iso,
+                        "app": self.app,
+                        "item": entry["item"],
+                        "old": entry["old"],
+                        "new": entry["new"],
+                        "reason": entry["reason"],
+                    }
+                )
+            self.checks.append(
+                {
+                    "name": "config_saved",
+                    "ok": True,
+                    "evidence": "学習を config.local.json へ保存 "
+                    "(バックアップ: %s / 学習記録へ追記)" % os.path.basename(backup),
+                }
+            )
+        else:
+            self.checks.append(
+                {
+                    "name": "config_saved",
+                    "ok": True,
+                    "evidence": "現行の座標・フレームで問題なし (学習不要)",
+                }
+            )
+
+        # 4) 自己確認 (送信なし): 固定文で 入力 → 検閲 → 空に戻す
+        text = ccfg["self_check_text"]
+        in_ok = self.input(text)
+        v_ok = self.verify(text, "field") if in_ok else False
+        c_ok = self.clear() if in_ok else False
+        self_check_ok = bool(in_ok and v_ok and c_ok)
+        self.checks.append(
+            {
+                "name": "self_check",
+                "ok": self_check_ok,
+                "evidence": (
+                    "自己確認合格 (入力 → 検閲 → 空に戻す)"
+                    if self_check_ok
+                    else "自己確認 NG (入力 %s / 検閲 %s / 後片付け %s)"
+                    % (in_ok, v_ok, c_ok)
+                ),
+            }
+        )
+        shot_path, _ = self.careful_capture("selfcheck")
+        evidence_ok = evidence_ok and shot_path is not None
+        return self_check_ok and evidence_ok, learned, self_check_ok
+
+
+class Runner(_CaptureMixin, _ProbeMixin, _HeaderMixin, _NavMixin, _CarefulMixin):
     def __init__(self, cfg, app, to=None):
         self.cfg = cfg
         self.mac = Mac(cfg)
@@ -2374,75 +3565,6 @@ class Runner:
         self.checks.extend(final_checks)
         return all(c["ok"] for c in final_checks)
 
-    def _capture_via_queue(self, action, build, extras=()):
-        """撮影系フェーズの共通キュー投入 (C-027 で共通化)。
-
-        build はキュー名を受け取ってスクリプト文字列を返す callable。
-        名前付け (_name) と所要計測 (_timed、ラベルは撮影系共通の
-        "capture") をここに集約し、呼び出し側は撮影後の処理だけを持つ。
-        """
-        name = self._name(action)
-        return self._timed(
-            "capture",
-            lambda: self.mac.run_queue(build(name), name, extras=extras),
-        )
-
-    def capture_png(self):
-        """対象ウィンドウを撮影だけし、PNG を last_png_bytes に取り込む。
-
-        単独 send の送信後スクショ用。成功したら True。
-        """
-        res = self._capture_via_queue(
-            "capture",
-            lambda name: build_capture_script(name, self.app, self.acfg),
-            extras=("-png.b64",),
-        )
-        if res.get("status") != "ok":
-            return False
-        self.last_png_bytes = decode_b64_bytes(
-            res.get("_files", {}).get("-png.b64", "")
-        )
-        return self.last_png_bytes is not None
-
-    def store_post_send_screenshot(self):
-        """送信成功後のキャプチャを VM 側の定位置へ保存する。
-
-        last_png_bytes (post の送信後検閲で撮影したもの) があればそれを、
-        無ければ capture_png() で撮り直して (単独 send 用) 保存する。
-        戻り値: 保存先パス or None。結果は checks の 'screenshot' に残す。
-        取得・保存に失敗しても例外は投げない (送信結果は成功のままにする)。
-        """
-        try:
-            if not self.last_png_bytes:
-                self.capture_png()
-            if not self.last_png_bytes:
-                self.checks.append(
-                    {
-                        "name": "screenshot",
-                        "ok": False,
-                        "evidence": "送信後キャプチャを取得できなかった",
-                    }
-                )
-                return None
-            path = save_screenshot_file(self.app, self.last_png_bytes)
-            self.checks.append(
-                {
-                    "name": "screenshot",
-                    "ok": True,
-                    "evidence": "送信後キャプチャを保存: %s" % path,
-                }
-            )
-            return path
-        except Exception as e:  # noqa: BLE001
-            self.checks.append(
-                {
-                    "name": "screenshot",
-                    "ok": False,
-                    "evidence": "スクショ保存に失敗: %s: %s" % (type(e).__name__, e),
-                }
-            )
-            return None
-
     def pre_send_once(self, text):
         """送信前の一巡: 入力 → 欄モード検閲。
 
@@ -2461,1103 +3583,6 @@ class Runner:
             # run_post がエラー名を区別できるようにする
             record["recipient_error"] = self.recipient_header_error or "wrong_recipient"
         return False, retryable, record
-
-    # --- 慎重モード (careful): 学習の経路 -------------------------------------
-    # 高速パスが対応できないケースを段階的に解決し、学んだ座標・フレームを
-    # config.local.json へ保存して、次回から正常系として処理できるように
-    # する。送信キーは絶対に押さない (自己確認は test と同じ範囲まで)。
-
-    def careful_capture(self, step):
-        """ステップ証拠の撮影。成功したら (保存先パス, フレーム) を返す。
-
-        失敗したら (None, None)。結果は checks の careful_capture に残す。
-        """
-        res = self._capture_via_queue(
-            "capture",
-            lambda name: build_capture_script(name, self.app, self.acfg),
-            extras=("-png.b64",),
-        )
-        if res.get("status") != "ok":
-            self.checks.append(
-                {
-                    "name": "careful_capture",
-                    "ok": False,
-                    "evidence": "ステップ '%s' の撮影不可: status=%s"
-                    % (step, res.get("status", "no_result")),
-                }
-            )
-            return None, None
-        _win, frame = _parse_window(res)
-        if frame:
-            self.last_frame = frame
-        png = decode_b64_bytes(res.get("_files", {}).get("-png.b64", ""))
-        if png is None:
-            self.checks.append(
-                {
-                    "name": "careful_capture",
-                    "ok": False,
-                    "evidence": "ステップ '%s' のキャプチャを取得できなかった" % step,
-                }
-            )
-            return None, frame
-        path = save_careful_capture(self.app, step, png)
-        self.careful_screenshot = path
-        self.checks.append(
-            {
-                "name": "careful_capture",
-                "ok": True,
-                "evidence": "ステップ '%s' の証拠を保存: %s (frame=%s)"
-                % (step, path, frame),
-            }
-        )
-        return path, frame
-
-    def probe(self, candidates, ccfg):
-        """候補点を一括プローブし、フォーカスが当たった点を返す。
-
-        戻り値: dict (status / hit_index / point / tried / field_empty_after)。
-        送信キーは送らない。結果は checks の probe に残す。
-        """
-        name = self._name("probe")
-        res = self._timed(
-            "probe",
-            lambda: self.mac.run_queue(
-                build_probe_script(
-                    name, self.app, self.acfg, candidates, ccfg["probe_text"]
-                ),
-                name,
-                extras=("-leftover.txt",),
-            ),
-        )
-        st = res.get("status", "no_result")
-        out = {
-            "status": st,
-            "hit_index": int(res.get("probe_hit", "-1")),
-            "point": None,
-            "tried": int(res.get("probe_tried", "0")),
-            "field_empty_after": res.get("field_empty_after") == "yes",
-        }
-        if res.get("probe_point"):
-            xy = res["probe_point"].split()
-            if len(xy) == 2:
-                out["point"] = (int(float(xy[0])), int(float(xy[1])))
-        if st == "anomaly_leftover":
-            left = res.get("_files", {}).get("-leftover.txt", "")
-            ev = "欄に残りあり (何も触らず停止): %s" % left.strip()[:80]
-        elif st == "ok" and out["point"] is not None:
-            ev = "候補 %d 点中 %d 点目 %s でフォーカス確認" % (
-                out["tried"],
-                out["hit_index"] + 1,
-                out["point"],
-            )
-        else:
-            ev = "候補 %d 点すべてフォーカスせず (status=%s)" % (out["tried"], st)
-        self.checks.append(
-            {
-                "name": "probe",
-                "ok": st == "ok" and out["point"] is not None,
-                "evidence": ev,
-            }
-        )
-        self.checks.append(
-            {
-                "name": "probe_field_empty",
-                "ok": out["field_empty_after"],
-                "evidence": (
-                    "プローブ後、入力欄は空 (センチネル確認)"
-                    if out["field_empty_after"]
-                    else "プローブ後、入力欄が空に戻っていない"
-                ),
-            }
-        )
-        return out
-
-    def dismiss_overlay(self, frame, ccfg):
-        """想定外の覆いの汎用解消 (Esc + 外側クリック) を試みる。
-
-        スクリプトが完走したら True。解消できたか自体の判定は、この後の
-        再プローブに委ねる。結果は checks の overlay_dismiss に残す。
-        """
-        name = self._name("dismiss")
-        res = self._timed(
-            "dismiss",
-            lambda: self.mac.run_queue(
-                build_dismiss_script(name, self.app, self.acfg, frame, ccfg),
-                name,
-            ),
-        )
-        st = res.get("status", "no_result")
-        self.checks.append(
-            {
-                "name": "overlay_dismiss",
-                "ok": st == "ok",
-                "evidence": "汎用解消 (Esc + 外側クリック) を実行: status=%s" % st,
-            }
-        )
-        return st == "ok"
-
-    def snapshot_thumb(self, ccfg):
-        """画面確認用のサムネイル (PNG bytes)。失敗時は None。"""
-        name = self._name("snapshot")
-        res = self._timed(
-            "snapshot",
-            lambda: self.mac.run_queue(
-                build_snapshot_script(
-                    name, self.app, self.acfg, ccfg["dismiss_thumb_width"]
-                ),
-                name,
-                extras=("-thumb.b64",),
-            ),
-        )
-        if res.get("status") != "ok":
-            return None
-        return decode_b64_bytes(res.get("_files", {}).get("-thumb.b64", ""))
-
-    def _probe_after_dismiss(self, candidates, frame, ccfg, res):
-        """分類→対処: 覆いの疑い (probe_no_hit) への対処。
-
-        対処は「汎用解消 → 画面がクリーンになったかの再確認 (解消前後の
-        サムネイル差分) → 再プローブ」。再確認で変化が無ければ覆いが
-        残っているとみなし、再プローブせず停止側に落とす。試行回数は
-        dismiss_retries で上限を設ける (無限ループ防止)。解消できれば
-        解消後のプローブ結果を返し、できなければ overlay_blocked を
-        立てて最後の結果を返す (無理に進めない)。
-        """
-        self.checks.append(
-            {
-                "name": "anomaly_class",
-                "ok": True,
-                "evidence": "異常の種類: 覆いの疑い (入力欄に到達できず) "
-                "→ 対処: 汎用解消 + 再確認 + 再プローブ",
-            }
-        )
-        for _ in range(max(0, int(ccfg["dismiss_retries"]))):
-            before = self.snapshot_thumb(ccfg)
-            if not self.dismiss_overlay(frame, ccfg):
-                break
-            self.careful_capture("overlay-dismissed")
-            after = self.snapshot_thumb(ccfg)
-            ratio = (
-                png_diff_ratio(before, after)
-                if before is not None and after is not None
-                else None
-            )
-            if ratio is not None:
-                clean = ratio > float(ccfg["dismiss_change_threshold"])
-                self.checks.append(
-                    {
-                        "name": "overlay_clean",
-                        "ok": clean,
-                        "evidence": "解消前後の画面差分 %.4f (しきい値 %.4f): %s"
-                        % (
-                            ratio,
-                            float(ccfg["dismiss_change_threshold"]),
-                            (
-                                "変化あり (クリーンと確認)"
-                                if clean
-                                else "変化なし (覆いが残っている疑い)"
-                            ),
-                        ),
-                    }
-                )
-                if not clean:
-                    break
-            res = self.probe(candidates, ccfg)
-            if res["status"] != "probe_no_hit":
-                break
-        if res["status"] == "ok" and res["point"] is not None:
-            self.checks.append(
-                {
-                    "name": "overlay",
-                    "ok": True,
-                    "evidence": "覆いを解消し、再プローブで入力欄に到達できた",
-                }
-            )
-        elif res["status"] == "probe_no_hit":
-            self.overlay_blocked = True
-            self.checks.append(
-                {
-                    "name": "overlay",
-                    "ok": False,
-                    "evidence": "汎用解消を試みても入力欄に到達できず停止 "
-                    "(想定外の覆いが残っている疑い。無理に進めない)",
-                }
-            )
-        return res
-
-    def capture_ocr(self):
-        """対象ウィンドウを撮影し、(フレーム, OCR items) を返す。
-
-        撮影・OCR ができなければ (None, [])。checks には積まない
-        (呼び出し側が文脈に合ったチェック名で記録する)。
-        """
-        res = self._capture_via_queue(
-            "verify",
-            lambda name: build_verify_script(
-                name, self.app, self.acfg, tun=self.tunables
-            ),
-            extras=("-ocr.txt",),
-        )
-        if res.get("status") != "ok":
-            return None, []
-        _win, frame = _parse_window(res)
-        if frame:
-            self.last_frame = frame
-        return frame, parse_ocr(res.get("_files", {}).get("-ocr.txt", ""))
-
-    def capture_header_runs(self):
-        """対象ウィンドウを撮影し、(フレーム, ヘッダ切り出し run 群) を返す。
-
-        build_verify_script が作るヘッダ帯切り出し OCR
-        (-header-ocr.txt) だけを取得し、その項目を text_runs
-        (merge 間隔は tunables の talk_row_merge_px) で run 化する。
-        全体 OCR (-ocr.txt) は取得も判定もしない。撮影ができなければ
-        (None, [])、切り出しファイルが無い・空なら (フレーム, [])。
-        checks には積まない (capture_ocr と同じ作法)。last_frame の
-        更新も capture_ocr と同様に行う。戻り値 (フレーム, runs) は
-        従来通りで、parse した項目は self._last_header_items にも
-        保持する (候補拡張が有効なアプリで項目候補を作るため)。
-        """
-        self._last_header_items = []
-        res = self._capture_via_queue(
-            "verify",
-            lambda name: build_verify_script(
-                name, self.app, self.acfg, tun=self.tunables
-            ),
-            extras=("-header-ocr.txt",),
-        )
-        if res.get("status") != "ok":
-            return None, []
-        _win, frame = _parse_window(res)
-        if frame:
-            self.last_frame = frame
-        items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
-        self._last_header_items = items
-        return frame, text_runs(items, float(self.tunables["talk_row_merge_px"]))
-
-    def click_point(self, point):
-        """指定点を 1 回クリックする (前面化つき)。送信キーは送らない。"""
-        name = self._name("click")
-        res = self._timed(
-            "click",
-            lambda: self.mac.run_queue(
-                build_click_script(name, self.app, self.acfg, point), name
-            ),
-        )
-        return res.get("status") == "ok"
-
-    def _exact_nav_candidates(self, frame, items, aliases):
-        """トーク一覧の OCR から、宛先エイリアスのいずれかと完全一致する
-        行の候補を (point, text) のリストで返す (座標の重複は除く)。
-
-        scrutinize_nav の探索規則そのもの。ホーム遷移リトライ後の
-        再探索でも同じ規則を使うため、切り出して共有する。
-        """
-        exact = []
-        seen_points = set()
-        for alias in aliases:
-            for x, y, text in self.find_talk_candidates(alias, frame, items):
-                if not any(norm(text) == norm(a) for a in aliases):
-                    continue
-                point = (int(x), int(y))
-                if point in seen_points:
-                    continue
-                seen_points.add(point)
-                exact.append((point, text))
-        return exact
-
-    def scrutinize_nav(self):
-        """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
-        行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
-
-        一覧の並び替えで保存座標が別人の行を指すようになっている場合に、
-        その座標で開いてしまう事故を防ぐ前段ゲート。宛先エイリアス
-        ごとに find_talk_candidates で一覧探索し (再学習と同じ規則)、
-        返ってきた候補のうちエイリアスのいずれかと完全一致するもの
-        だけを「完全一致候補」とする (部分一致のみは候補に数えない)。
-        行の同一性は縦座標で判定する (横は一覧領域内であることが
-        候補の条件で担保される)。許容差は tunables の
-        nav_scrutiny_row_tolerance_px。
-
-        - 候補 1 件かつ保存座標と同じ行: 通過 (クリック・保存なし)
-        - 候補 1 件だが保存座標と違う行: その行をクリックして開き、
-          recipients 辞書の nav_click を候補座標へ更新して保存する
-          (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
-          同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
-          入力が新しい座標を使うようにする
-        - 候補 0 件で実効設定に home_click がある場合のみ、救済として
-          ホームボタンへ 1 回だけ遷移し、再撮影して探索をやり直す
-          (アプリが別画面を開いていて一覧が見えていないケース)。
-          再探索で候補が 1 件見つかれば通常の判定に合流する。
-          クリック失敗時は nav_home_click_failed、再撮影不可は
-          nav_scrutiny_unreadable で停止する。試行は checks の
-          nav_home に残す
-        - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
-          False を返し、self.nav_scrutiny_error に理由を残す
-          (クリックも設定変更もしない。修正クリック失敗時と
-          上記のホーム救済時を除く)
-        - nav_click 未設定で候補 1 件: それを正として通過扱い
-        精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
-        この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
-        talk_list_width_ratio() がアプリ別に解決するため、LINE /
-        Discord の両方で同じ精査が効く。
-        結果は checks の nav_scrutiny に残す。戻り値: 通過なら True。
-        """
-        self.nav_scrutiny_error = None
-        aliases = list(self.acfg.get("recipient_aliases", []))
-        frame, items = self.capture_ocr()
-        if frame is None or not items:
-            self.nav_scrutiny_error = "nav_scrutiny_unreadable"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧を読み取れなかった "
-                    "(撮影・OCR ができず nav_click を精査できない / "
-                    "想定宛先: %s)" % "/".join(aliases),
-                }
-            )
-            return False
-        exact = self._exact_nav_candidates(frame, items, aliases)
-        if not exact:
-            home = self.acfg.get("home_click")
-            if home:
-                # 救済: アプリが別画面 (Discord のサーバー画面など) を開いて
-                # いて DM 一覧が見えていないケース。ホームボタンへ 1 回だけ
-                # 遷移して再探索する。クリックは最大 1 回で、文字入力・
-                # 送信キーは行わない。home_click 未設定なら従来どおり
-                # この救済は発動せず、そのまま未検出で停止する。
-                home_point = tuple(int(v) for v in home)
-                if self.click_point(home_point) is False:
-                    self.checks.append(
-                        {
-                            "name": "nav_home",
-                            "ok": False,
-                            "evidence": "ホームボタン (%d, %d) をクリック"
-                            "できなかったため、再探索せず停止" % home_point,
-                        }
-                    )
-                    self.nav_scrutiny_error = "nav_home_click_failed"
-                    self.checks.append(
-                        {
-                            "name": "nav_scrutiny",
-                            "ok": False,
-                            "evidence": "ホーム遷移のクリックに失敗したため"
-                            " nav_click を精査できない (想定宛先: %s)"
-                            % "/".join(aliases),
-                        }
-                    )
-                    return False
-                frame, items = self.capture_ocr()
-                if frame is None or not items:
-                    self.checks.append(
-                        {
-                            "name": "nav_home",
-                            "ok": False,
-                            "evidence": "ホーム遷移後のトーク一覧を"
-                            "読み取れなかった (撮影・OCR 不可)",
-                        }
-                    )
-                    self.nav_scrutiny_error = "nav_scrutiny_unreadable"
-                    self.checks.append(
-                        {
-                            "name": "nav_scrutiny",
-                            "ok": False,
-                            "evidence": "ホーム遷移後にトーク一覧を"
-                            "読み取れなかった (撮影・OCR ができず "
-                            "nav_click を精査できない / 想定宛先: %s)"
-                            % "/".join(aliases),
-                        }
-                    )
-                    return False
-                exact = self._exact_nav_candidates(frame, items, aliases)
-                self.checks.append(
-                    {
-                        "name": "nav_home",
-                        "ok": bool(exact),
-                        "evidence": "ホームボタン (%d, %d) へ遷移して"
-                        "再探索した (完全一致候補 %d 件)"
-                        % (home_point + (len(exact),)),
-                    }
-                )
-        if not exact:
-            self.nav_scrutiny_error = "nav_recipient_not_found"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が"
-                    "見つからない (部分一致のみは候補にしない)" % "/".join(aliases),
-                }
-            )
-            return False
-        if len(exact) > 1:
-            self.nav_scrutiny_error = "nav_recipient_ambiguous"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "トーク一覧に宛先 (%s) と完全一致する行が "
-                    "%d 件あり特定できない (何も変更せず停止)"
-                    % ("/".join(aliases), len(exact)),
-                }
-            )
-            return False
-        (cx, cy), row_text = exact[0]
-        nav = self.acfg.get("nav_click")
-        if not nav:
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": True,
-                    "evidence": "nav_click 未設定のため、トーク一覧で"
-                    "見つけた宛先 '%s' の行 (%d, %d) を正として通過"
-                    % (row_text, cx, cy),
-                }
-            )
-            return True
-        tolerance = float(
-            self.tunables.get(
-                "nav_scrutiny_row_tolerance_px",
-                DEFAULT_TUNABLES["nav_scrutiny_row_tolerance_px"],
-            )
-        )
-        if abs(cy - int(nav[1])) <= tolerance:
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": True,
-                    "evidence": "保存済み nav_click (%d, %d) の行が宛先 "
-                    "'%s' 本人であることを確認 (候補行 (%d, %d) との"
-                    "縦座標差が許容差 %dpx 以内)"
-                    % (int(nav[0]), int(nav[1]), row_text, cx, cy, int(tolerance)),
-                }
-            )
-            return True
-        # 不一致: 保存座標が別人の行を指している。探索で見つけた
-        # 本人の行を開き、nav_click をその座標へ更新して保存する。
-        old_nav = [int(nav[0]), int(nav[1])]
-        new_nav = [cx, cy]
-        if self.click_point((cx, cy)) is False:
-            self.nav_scrutiny_error = "nav_scrutiny_click_failed"
-            self.checks.append(
-                {
-                    "name": "nav_scrutiny",
-                    "ok": False,
-                    "evidence": "宛先 '%s' の行 (%d, %d) をクリック"
-                    "できなかったため、nav_click を更新せず停止" % (row_text, cx, cy),
-                }
-            )
-            return False
-        recips = self.app_cfg.get("recipients") or {}
-        if self.recipient_id is not None and self.recipient_id in recips:
-            recips[self.recipient_id]["nav_click"] = list(new_nav)
-        else:
-            # 旧形式 (アプリ直下の nav_click) の config への後方互換
-            self.app_cfg["nav_click"] = list(new_nav)
-        self.acfg["nav_click"] = list(new_nav)
-        backup = save_config(self.cfg)
-        append_learned_case(
-            {
-                "at": datetime.now(JST).isoformat(),
-                "app": self.app,
-                "item": "recipient_nav_click:" + str(self.recipient_id),
-                "old": old_nav,
-                "new": list(new_nav),
-                "reason": "nav 精査で保存座標が別人の行を指していたため、"
-                "一覧探索で見つけた宛先本人の行へ更新",
-            }
-        )
-        backup_note = (
-            "バックアップ: %s" % os.path.basename(backup) if backup else "保存済み"
-        )
-        self.checks.append(
-            {
-                "name": "nav_scrutiny",
-                "ok": True,
-                "evidence": "保存座標 (%d, %d) が別人の行を指していたため、"
-                "探索で見つけた宛先 '%s' の行 (%d, %d) に nav_click を"
-                "更新した (旧 %s → 新 %s / %s)"
-                % (
-                    old_nav[0],
-                    old_nav[1],
-                    row_text,
-                    cx,
-                    cy,
-                    old_nav,
-                    new_nav,
-                    backup_note,
-                ),
-            }
-        )
-        return True
-
-    def other_recipient_formal_names(self):
-        """宛先以外の登録済み宛先の正式名リスト (OTHER 判定用)。
-
-        アプリ設定の recipients 辞書から取る (formal_names_of_others)。
-        旧形式 (宛先 1 件だけ) の config では空になる。
-        """
-        recips, _default = recipients_of(self.app_cfg)
-        return formal_names_of_others(recips, self.recipient_id)
-
-    def header_candidate_expansion_enabled(self):
-        """ヘッダ候補拡張がこのアプリで有効か (config 駆動)。
-
-        apps.<app> 配下の header_candidate_expansion が真の場合のみ
-        有効。アプリ名のハードコードや文字列内容による分岐はしない。
-        実効設定 (self.acfg) 側にキーがあればそちらも見る。
-        """
-        for cfg in (self.app_cfg, self.acfg):
-            if cfg and cfg.get(HEADER_CANDIDATE_EXPANSION_KEY):
-                return True
-        return False
-
-    def _header_candidates(self, runs, items=None):
-        """宛先判定に渡す候補群を返す。
-
-        候補拡張が有効なアプリでのみ expand_header_candidates で
-        拡張する。無効なアプリ (LINE を含む) では runs をそのまま
-        (同一のオブジェクト・順序・内容で) 返すため、classify に
-        渡る run 群は現行と完全に同一になる。
-        """
-        if not self.header_candidate_expansion_enabled():
-            return runs
-        return expand_header_candidates(runs, items)
-
-    def _judge_header_multi(self, attempt_fn):
-        """ヘッダ複数回判定の共有ドライバ。
-
-        attempt_fn() は 1 回撮影し直して、classify_header_attempt の
-        結果に "header" (その回のヘッダ run 文字列リスト) を加えた
-        dict を返す。各回は必ず撮り直す (前回の画像・OCR の使い回し
-        禁止)。最大で tunables の header_check_attempts 回まで撮影し、
-        撮影と撮影の間には header_check_interval_sec 秒を
-        time.sleep で空ける。総合判定:
-        - OTHER が 1 回でも出たら残りの撮影をせず即失敗
-          (error="wrong_recipient")
-        - N 回撮り終えて OTHER 無し・MATCH 1 回以上で合格
-        - 全部 UNREADABLE なら「確認できず」で失敗
-          (error="recipient_header_unreadable"、wrong_recipient と区別)
-        MATCH が出ても早期終了はしない (打ち切るのは OTHER だけ)。
-        戻り値: (ok, error, attempts)。
-        """
-        n = int(
-            self.tunables.get(
-                "header_check_attempts", DEFAULT_TUNABLES["header_check_attempts"]
-            )
-        )
-        interval = float(
-            self.tunables.get(
-                "header_check_interval_sec",
-                DEFAULT_TUNABLES["header_check_interval_sec"],
-            )
-        )
-        attempts = []
-        for i in range(max(1, n)):
-            if i > 0:
-                time.sleep(interval)
-            att = dict(attempt_fn())
-            att["attempt"] = i + 1
-            attempts.append(att)
-            if att["classification"] == "OTHER":
-                break
-        if any(a["classification"] == "OTHER" for a in attempts):
-            return False, "wrong_recipient", attempts
-        if any(a["classification"] == "MATCH" for a in attempts):
-            return True, None, attempts
-        return False, "recipient_header_unreadable", attempts
-
-    def check_recipient_header(self):
-        """入力前に、開いたトークのヘッダだけで宛先を確認する。
-
-        nav_click があればその行をクリックして開いてから、複数回
-        判定 (共有ドライバ _judge_header_multi) で、各回の撮影ごとに
-        capture_header_runs() が返すヘッダ帯切り出し OCR の run 群
-        だけを宛先エイリアスと照合する (全体 OCR からヘッダ領域を
-        座標で拾う方式は使わない)。トーク一覧に写った名前では
-        合格しない。各回の分類は MATCH / OTHER / UNREADABLE の 3 値で、
-        evidence と構造化フィールド (attempts) に各回のヘッダ文字列と
-        分類を残す。
-        戻り値: 合格したら True。結果は checks の recipient_header
-        に残す。OTHER (別人) の場合は self.wrong_recipient
-        (cleaned=False: まだ何も入力していないため消すものは無い) と
-        self.recipient_header_error="wrong_recipient" を残す。
-        全部 UNREADABLE (撮影・OCR ができない場合を含む) は
-        recipient_header_error="recipient_header_unreadable" として
-        False を返す (wrong_recipient とは区別する)。
-        """
-        self.recipient_header_error = None
-        aliases = list(self.acfg.get("recipient_aliases", []))
-        nav = self.acfg.get("nav_click")
-        if nav:
-            if not self.click_point(nav):
-                self.recipient_header_error = "recipient_header_unreadable"
-                self.checks.append(
-                    {
-                        "name": "recipient_header",
-                        "ok": False,
-                        "evidence": "宛先のトークを開けなかった "
-                        "(nav_click=%s のクリック失敗 / 想定宛先: %s)"
-                        % (list(nav), "/".join(aliases)),
-                    }
-                )
-                return False
-        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
-        other_names = self.other_recipient_formal_names()
-
-        def attempt_fn():
-            frame, runs = self.capture_header_runs()
-            if frame is None or not runs:
-                return {
-                    "classification": "UNREADABLE",
-                    "kind": None,
-                    "extra": 0,
-                    "run_text": None,
-                    "matched": None,
-                    "header": [],
-                }
-            candidates = self._header_candidates(
-                runs, getattr(self, "_last_header_items", None)
-            )
-            att = classify_header_attempt(
-                candidates, aliases, other_names, prefix_max_extra=max_extra
-            )
-            # 証跡の header は実際の OCR run のまま (拡張候補は混ぜない)
-            att["header"] = [text for _point, text in runs]
-            return att
-
-        ok, error, attempts = self._judge_header_multi(attempt_fn)
-        attempts_ev = header_attempts_evidence(attempts)
-        if ok:
-            evidence = "宛先をヘッダで確認 (複数回判定 %d 回: %s / 想定宛先: %s)" % (
-                len(attempts),
-                attempts_ev,
-                "/".join(aliases),
-            )
-        elif error == "wrong_recipient":
-            evidence = (
-                "宛先違いをヘッダで検出 (複数回判定 %d 回: %s / 想定宛先: %s)"
-                % (len(attempts), attempts_ev, "/".join(aliases))
-            )
-        else:
-            evidence = (
-                "ヘッダを確認できず (複数回判定 %d 回すべて UNREADABLE: %s / "
-                "想定宛先: %s)" % (len(attempts), attempts_ev, "/".join(aliases))
-            )
-        self.checks.append(
-            {
-                "name": "recipient_header",
-                "ok": ok,
-                "evidence": evidence,
-                "expected": list(aliases),
-                "actual_header": [t for a in attempts for t in (a.get("header") or [])],
-                "attempts": attempts,
-                "recipient_error": error,
-            }
-        )
-        if not ok:
-            self.recipient_header_error = error
-            if error == "wrong_recipient":
-                other_att = next(a for a in attempts if a["classification"] == "OTHER")
-                self.wrong_recipient = {
-                    "expected": list(aliases),
-                    "actual_header": list(other_att.get("header") or []),
-                    "cleaned": False,
-                }
-            return False
-        return True
-
-    def _text_runs(self, items):
-        """OCR 項目を行単位の run にまとめる (共有ヘルパーへの委譲)。
-
-        規則はモジュールレベルの text_runs と同じで、merge 間隔は
-        tunables の talk_row_merge_px を使う。
-        """
-        return text_runs(items, float(self.tunables["talk_row_merge_px"]))
-
-    def talk_list_width_ratio(self):
-        """トーク一覧とみなす横範囲 (窓幅比) をアプリ別に解決する。
-
-        apps.<app> の talk_list_width_ratio があればそれを優先し、
-        無ければ共通 tunables の値 (既定 0.32) を使う。一覧の幅は
-        アプリのレイアウト依存 (例: LINE の一覧は窓幅の約26%で、共通値
-        0.32 では開いた先のヘッダ名まで一覧側に含めてしまい、ヘッダ
-        確認が常時失敗する) のため、アプリ別の上書きを可能にする。
-        """
-        return float(resolve_talk_list_width_ratio(self.app_cfg, self.tunables))
-
-    def find_talk_candidates(self, name, frame, items):
-        """トーク一覧の領域から、名前の行の候補をクリック点つきで返す。
-
-        戻り値: [(click_x, click_y, ocr_text), ...]。
-        判定は行の中の連続した文字列単位で行い (名前と人数表記が別
-        項目に割れていれば連結した文字列で見る)、完全一致する文字列
-        があればそれだけを、無ければ名前を含む文字列を候補にする。
-        クリック点は画面絶対座標。
-        """
-        target = norm(name)
-        if not target or not frame:
-            return []
-        fx, fy, fw, _fh = (int(v) for v in frame)
-        limit_x = fw * self.talk_list_width_ratio()
-        in_list = [it for it in items if it["x"] <= limit_x and norm(it["text"])]
-        exact, partial = [], []
-        for (px, py), text in self._text_runs(in_list):
-            text_n = norm(text)
-            entry = (int(fx + px), int(fy + py), text)
-            if text_n == target:
-                exact.append(entry)
-            elif target in text_n:
-                partial.append(entry)
-        return exact if exact else partial
-
-    def relearn_recipient(self, name):
-        """未知宛先の再学習: 座標の再取得 → 辞書への変数登録。
-
-        流れ: 画面を撮影し、トーク一覧から指定名の行を探す → その行の
-        座標をクリックして開く → 開いた先のヘッダの宛名が指定名と
-        一致するか OCR で確認する → 一致したら、その座標 (nav_click) と
-        照合用エイリアスを config の recipients 辞書へ新しい変数として
-        登録する (書き込み前にバックアップ + 学習記録へ追記)。
-        見つからない / 同じ名前の行が複数ある・名前と完全一致する行が
-        無く部分一致のみ (グループ名等の可能性) で特定できない /
-        ヘッダが完全一致しない場合は、何も登録せず停止する。戻り値:
-        (ok, learned_entries)。失敗理由は self.relearn_error に残す。
-        """
-        name = str(name).strip()
-        target = norm(name)
-        frame, items = self.capture_ocr()
-        if frame is None:
-            self.checks.append(
-                {
-                    "name": "recipient_search",
-                    "ok": False,
-                    "evidence": "画面を撮影できず、トーク一覧を探せなかった",
-                }
-            )
-            self.relearn_error = "recipient_search_failed"
-            return False, []
-        cands = self.find_talk_candidates(name, frame, items)
-        if not cands:
-            self.checks.append(
-                {
-                    "name": "recipient_search",
-                    "ok": False,
-                    "evidence": "トーク一覧に '%s' が見つからない" % name,
-                }
-            )
-            self.careful_capture("recipient-not-found")
-            self.relearn_error = "recipient_not_found"
-            return False, []
-        if len(cands) > 1:
-            self.checks.append(
-                {
-                    "name": "recipient_search",
-                    "ok": False,
-                    "evidence": "トーク一覧に '%s' と読める行が %d 件あり特定できない"
-                    " (同名・グループ等の可能性。何も登録せず停止)"
-                    % (name, len(cands)),
-                }
-            )
-            self.careful_capture("recipient-ambiguous")
-            self.relearn_error = "recipient_ambiguous"
-            return False, []
-        if norm(cands[0][2]) != target:
-            # 完全一致の行が無く、名前を含むだけの行が 1 件だけある。
-            # より長い名前の一部か、グループ名 (「○○と他2名」等) の
-            # 可能性があり特定できないため、曖昧として登録せず停止する。
-            self.checks.append(
-                {
-                    "name": "recipient_search",
-                    "ok": False,
-                    "evidence": "トーク一覧に '%s' と完全一致する行がなく、"
-                    "部分一致のみ (%s)。グループ等の可能性があるため"
-                    "特定できず、何も登録せず停止" % (name, cands[0][2]),
-                }
-            )
-            self.careful_capture("recipient-ambiguous")
-            self.relearn_error = "recipient_ambiguous"
-            return False, []
-        x, y, _row_text = cands[0]
-        self.checks.append(
-            {
-                "name": "recipient_search",
-                "ok": True,
-                "evidence": "トーク一覧で '%s' の行の座標を再取得 (%d, %d)"
-                % (name, x, y),
-            }
-        )
-        if not self.click_point((x, y)):
-            self.checks.append(
-                {
-                    "name": "recipient_search",
-                    "ok": False,
-                    "evidence": "トーク行 (%d, %d) をクリックできなかった" % (x, y),
-                }
-            )
-            self.relearn_error = "recipient_search_failed"
-            return False, []
-        _frame2, items2 = self.capture_ocr()
-        header_limit = float(self.tunables["relearn_header_max_y"])
-        # ヘッダ確認は、開いたトーク側の領域 (トーク一覧より右) に
-        # 限定する。一覧は開いた後も左に残るため、帯の縦範囲だけで
-        # 見ると一覧側の名前で合格してしまう。判定は行の中の連続した
-        # 文字列単位で行う。一致条件は完全一致、または「指定名で始まり
-        # 余りが relearn_header_prefix_max_extra 文字以内」の前方一致。
-        # ヘッダ名の右にあるアイコンが OCR で名前の後ろに連結される
-        # 誤読 (例「<名前>4呼」) を吸収するための緩和で、領域スコープと
-        # 一覧側の完全一致 (クリック前に確定) が安全側の担保になる。
-        # この判定はアプリ共通経路であり、LINE / Discord の両方に効く。
-        fw2 = (_frame2 or frame)[2]
-        max_extra = resolve_relearn_header_prefix_max_extra(self.tunables)
-        header_runs = header_region_runs(
-            items2,
-            fw2,
-            self.talk_list_width_ratio(),
-            header_limit,
-            float(self.tunables["talk_row_merge_px"]),
-        )
-        kind, extra, run_text, _alias = header_alias_match(
-            header_runs, [target], prefix_max_extra=max_extra
-        )
-        header_hit = norm(run_text) if kind else None
-        header_match = kind  # "exact" | "prefix" | None
-        header_extra = extra if kind else 0
-        if header_hit is None:
-            self.checks.append(
-                {
-                    "name": "recipient_header",
-                    "ok": False,
-                    "evidence": "開いた先のヘッダに '%s' が見当たらない"
-                    " (完全一致・前方一致 (余り%d文字以内) のいずれでも"
-                    "一致せず、何も登録せず停止)" % (name, max_extra),
-                }
-            )
-            self.careful_capture("recipient-header-mismatch")
-            self.relearn_error = "recipient_header_mismatch"
-            return False, []
-        if header_match == "exact":
-            header_evidence = (
-                "開いた先のヘッダで宛名 '%s' を確認 (一致方式: exact)" % header_hit
-            )
-        else:
-            header_evidence = (
-                "開いた先のヘッダで宛名 '%s' を確認"
-                " (一致方式: prefix、ヘッダ文字列 '%s'、余り%d文字)"
-                % (name, header_hit, header_extra)
-            )
-        self.checks.append(
-            {
-                "name": "recipient_header",
-                "ok": True,
-                "evidence": header_evidence,
-            }
-        )
-        # 登録する変数: トークを開く座標 (nav_click) と照合用エイリアス。
-        # 前方一致の場合はヘッダ文字列に誤読分が混ざっているため、
-        # エイリアスには指定名だけを使う (完全一致時のみ従来通り
-        # ヘッダで読めた文字列も候補にする)。
-        aliases = [name]
-        header_name = header_hit.strip() if header_match == "exact" else ""
-        if header_name and header_name not in aliases:
-            aliases.append(header_name)
-        entry = {"aliases": aliases, "nav_click": [x, y]}
-        old_recips, old_default = recipients_of(self.app_cfg)
-        recips = dict(old_recips)
-        recips[name] = entry
-        self.app_cfg["recipients"] = recips
-        if not self.app_cfg.get("default_recipient") and old_default:
-            self.app_cfg["default_recipient"] = old_default
-        backup = save_config(self.cfg)
-        append_learned_case(
-            {
-                "at": datetime.now(JST).isoformat(),
-                "app": self.app,
-                "item": "recipient:" + name,
-                "old": None,
-                "new": entry,
-                "reason": "再学習フローで座標を再取得して登録",
-            }
-        )
-        self.recipient_id = name
-        self.recipient_known = True
-        self.acfg = effective_acfg(self.app_cfg, entry)
-        self.acfg["recipient_id"] = name
-        self.checks.append(
-            {
-                "name": "config_saved",
-                "ok": True,
-                "evidence": "宛先 '%s' を辞書へ登録 (nav_click=%s / aliases=%s。"
-                "バックアップ: %s)" % (name, [x, y], aliases, os.path.basename(backup)),
-            }
-        )
-        learned = [
-            {
-                "item": "recipient",
-                "old": None,
-                "new": {"id": name, "aliases": aliases, "nav_click": [x, y]},
-                "reason": "再学習フローで座標を再取得して登録",
-            }
-        ]
-        return True, learned
-
-    def careful(self, to_name=None):
-        """慎重モード本体。戻り値: (ok, learned, self_check_ok)。
-
-        to_name に辞書に無い宛先が指定されていたら、先に再学習フロー
-        (座標の再取得 → 辞書への変数登録) を行い、登録できたら通常の
-        慎重モード本体 (座標の探索・保存・自己確認) へ進む。登録
-        できなければ何も登録せず停止する。
-        """
-        learned = []
-        if to_name and not self.recipient_known:
-            ok_rel, entries = self.relearn_recipient(to_name)
-            learned.extend(entries)
-            if not ok_rel:
-                return False, learned, False
-        body_ok, body_learned, self_check_ok = self._careful_body()
-        learned.extend(body_learned)
-        return body_ok, learned, self_check_ok
-
-    def _careful_body(self):
-        """慎重モード本体 (座標の探索と学習)。戻り値は careful と同じ。
-
-        learned は {"item", "old", "new", "reason"} のリスト。学習した値は
-        config.local.json へ保存 (バックアップ + 学習記録の追記) し、
-        仕上げに固定文での自己確認 (入力 → 検閲 → 空に戻す) で正常系へ
-        戻ったことを証明する。
-        """
-        learned = []
-        ccfg = careful_cfg(self.app, self.acfg)
-        tol = int(ccfg["frame_tolerance"])
-        evidence_ok = True  # ステップ証拠が全て保存できたか (合否に連動させる)
-
-        # 1) ウィンドウのフレーム取得 + 学習済みフレームとの比較
-        win_path, frame = self.careful_capture("window")
-        if frame is None:
-            return False, learned, False
-        evidence_ok = evidence_ok and win_path is not None
-        old_frame = self.acfg.get("learned_frame")
-        drift = frame_drift(old_frame, frame)
-        self.checks.append(
-            {
-                "name": "frame_compare",
-                "ok": True,
-                "evidence": (
-                    "学習済みフレームなし (今回を基準として記録)"
-                    if old_frame is None
-                    else "フレーム差 %s (許容差 %dpx): 学習 %s → 現在 %s"
-                    % (drift, tol, old_frame, list(frame))
-                ),
-            }
-        )
-
-        # 2) 入力欄の探索 (現行座標 → グリッド候補の順)
-        candidates = probe_candidates(frame, self.acfg, ccfg)
-        self.checks.append(
-            {
-                "name": "probe_candidates",
-                "ok": True,
-                "evidence": "候補 %d 点を生成 (先頭は学習済み座標)" % len(candidates),
-            }
-        )
-        res = self.probe(candidates, ccfg)
-        if res["status"] == "probe_no_hit":
-            # 入力欄に到達できない = 想定外の覆いの疑い。汎用解消を試す。
-            # (欄の残り anomaly_leftover は従来通り何も触らず停止する)
-            res = self._probe_after_dismiss(candidates, frame, ccfg, res)
-        if res["status"] != "ok" or res["point"] is None:
-            self.careful_capture("probe-failed")
-            return False, learned, False
-        if not res["field_empty_after"]:
-            return False, learned, False
-        probe_path, _ = self.careful_capture("probe")
-        evidence_ok = evidence_ok and probe_path is not None
-
-        # 3) 学習の保存 (必要な場合のみ)
-        hit = [int(res["point"][0]), int(res["point"][1])]
-        old_click = [int(v) for v in self.acfg.get("input_click", [])]
-        if hit != old_click:
-            learned.append(
-                {
-                    "item": "input_click",
-                    "old": old_click,
-                    "new": hit,
-                    "reason": "プローブでフォーカスが当たった候補 (候補 %d 点目)"
-                    % (res["hit_index"] + 1),
-                }
-            )
-        if old_frame is None or (drift is not None and drift > tol):
-            learned.append(
-                {
-                    "item": "learned_frame",
-                    "old": old_frame,
-                    "new": [int(v) for v in frame],
-                    "reason": (
-                        "基準フレームの新規記録"
-                        if old_frame is None
-                        else "フレーム差 %dpx が許容差 %dpx を超過" % (drift, tol)
-                    ),
-                }
-            )
-        if learned:
-            for entry in learned:
-                self.acfg[entry["item"]] = entry["new"]
-                # 実効設定 (self.acfg) はコピーなので、保存対象の実体
-                # (アプリ設定) にも同じ値を書く
-                self.app_cfg[entry["item"]] = entry["new"]
-            backup = save_config(self.cfg)
-            now_iso = datetime.now(JST).isoformat()
-            for entry in learned:
-                append_learned_case(
-                    {
-                        "at": now_iso,
-                        "app": self.app,
-                        "item": entry["item"],
-                        "old": entry["old"],
-                        "new": entry["new"],
-                        "reason": entry["reason"],
-                    }
-                )
-            self.checks.append(
-                {
-                    "name": "config_saved",
-                    "ok": True,
-                    "evidence": "学習を config.local.json へ保存 "
-                    "(バックアップ: %s / 学習記録へ追記)" % os.path.basename(backup),
-                }
-            )
-        else:
-            self.checks.append(
-                {
-                    "name": "config_saved",
-                    "ok": True,
-                    "evidence": "現行の座標・フレームで問題なし (学習不要)",
-                }
-            )
-
-        # 4) 自己確認 (送信なし): 固定文で 入力 → 検閲 → 空に戻す
-        text = ccfg["self_check_text"]
-        in_ok = self.input(text)
-        v_ok = self.verify(text, "field") if in_ok else False
-        c_ok = self.clear() if in_ok else False
-        self_check_ok = bool(in_ok and v_ok and c_ok)
-        self.checks.append(
-            {
-                "name": "self_check",
-                "ok": self_check_ok,
-                "evidence": (
-                    "自己確認合格 (入力 → 検閲 → 空に戻す)"
-                    if self_check_ok
-                    else "自己確認 NG (入力 %s / 検閲 %s / 後片付け %s)"
-                    % (in_ok, v_ok, c_ok)
-                ),
-            }
-        )
-        shot_path, _ = self.careful_capture("selfcheck")
-        evidence_ok = evidence_ok and shot_path is not None
-        return self_check_ok and evidence_ok, learned, self_check_ok
 
 
 # --- メイン ---------------------------------------------------------------------
