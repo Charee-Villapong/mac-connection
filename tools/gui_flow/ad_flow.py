@@ -104,6 +104,7 @@ def find_home_ref(tree, names):
             ref = node.get("ref_id")
             if ref:
                 return ref
+    fallback = None
     for node in iter_nodes(tree):
         if node.get("role") != "group":
             continue
@@ -112,8 +113,13 @@ def find_home_ref(tree, names):
             continue
         labels = _descendant_labels(node)
         if labels and len(set(labels)) == 1 and labels[0] in names:
-            return ref
-    return None
+            # レールのボタンは group が入れ子で 2 つ重なる。外側への
+            # クリックは無反応で、SetFocus を持つ内側が実効ターゲット
+            # (2026-11-07 実機で確認)。内側を優先する。
+            if "SetFocus" in (node.get("available_actions") or []):
+                return ref
+            fallback = fallback or ref
+    return fallback
 
 
 def header_alias(tree, aliases):
