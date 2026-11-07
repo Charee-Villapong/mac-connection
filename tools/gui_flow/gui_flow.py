@@ -1893,6 +1893,42 @@ def classify_needs_calibration(error, checks, acfg, last_frame, tun=None):
     }
 
 
+def classify_app_unresponsive(error, checks, acfg, last_frame, tun=None):
+    """停止理由を分類し、アプリ無応答の疑いなら app_unresponsive を返す。
+
+    戻り値: {"name": "app_unresponsive", "ok": False, "evidence": ...}
+    または None。条件は全て満たす場合のみ: error が
+    CALIBRATION_ERRORS に含まれる、失敗チェックが 1 件以上ありその
+    全てが input_status の fail_readback_empty である (成功チェックは
+    無視)、ウィンドウフレームが学習値と許容差以内で一致している。
+    """
+    if error not in CALIBRATION_ERRORS:
+        return None
+    failed = [c for c in (checks or []) if not c.get("ok")]
+    if not failed:
+        return None
+    for c in failed:
+        if c.get("name") != "input_status":
+            return None
+        if "fail_readback_empty" not in (c.get("evidence") or ""):
+            return None
+    tol = int(
+        ((acfg or {}).get("careful") or {}).get(
+            "frame_tolerance", CAREFUL_BASE_DEFAULTS["frame_tolerance"]
+        )
+    )
+    drift = frame_drift((acfg or {}).get("learned_frame"), last_frame)
+    if drift is None or drift > tol:
+        return None
+    return {
+        "name": "app_unresponsive",
+        "ok": False,
+        "evidence": "入力しても欄が空のまま (fail_readback_empty) だが、"
+        "ウィンドウフレームは学習値と一致している (差 %dpx / 許容差 %dpx) "
+        "ため座標ズレではなくアプリ無応答の疑い → アプリの再起動を推奨" % (drift, tol),
+    }
+
+
 def pre_send_recipient_error(r, record):
     """送信前検閲の宛先系失敗のエラー名を決める。
 
@@ -3833,12 +3869,21 @@ def main():
     # 異常分類: 座標・形状の疑いが強い停止は needs_calibration に差し替える
     # (careful での再学習に回す。宛先違い・残り・構造エラーは従来通り)。
     if not ok and args.action in ("post", "input", "send"):
-        cal = classify_needs_calibration(
-            error, r.checks, r.acfg, r.last_frame, tun=r.tunables
-        )
-        if cal is not None:
-            error = "needs_calibration"
-            r.checks.append(cal)
+        app_unresp = None
+        if args.action == "post" and args.app == "discord":
+            app_unresp = classify_app_unresponsive(
+                error, r.checks, r.acfg, r.last_frame, tun=r.tunables
+            )
+        if app_unresp is not None:
+            error = "app_unresponsive_suspect"
+            r.checks.append(app_unresp)
+        else:
+            cal = classify_needs_calibration(
+                error, r.checks, r.acfg, r.last_frame, tun=r.tunables
+            )
+            if cal is not None:
+                error = "needs_calibration"
+                r.checks.append(cal)
 
     # 送信成功時だけ、送信後キャプチャを定位置へ保存してパスを返す。
     # 失敗しても送信結果 (ok) は変えない (screenshot は null + checks に理由)。
