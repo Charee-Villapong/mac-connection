@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """ad_flow — agent-desktop 版 Discord 送信フロー.
 
+2026-11-07 改定: ad_flow は読み取り専用。送信は gui_flow 一本。post は封鎖。
+
 画面写真 + OCR + 座標クリックで Discord を操作する gui_flow に対し、
 ad_flow は agent-desktop のアクセシビリティツリー (名前・値を文字
 データで取得) で Discord を操作する。宛先確認・入力・読み戻し・
@@ -493,6 +495,20 @@ def main(argv=None):
     parser.add_argument("--to", default=None)
     parser.add_argument("--text-file", required=True)
     args = parser.parse_args(argv)
+
+    if args.action == "post":
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": "ad_flow_read_only",
+                    "evidence": "ad_flow は読み取り専用です。"
+                    "送信は gui_flow を使用してください。",
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
 
     text = Path(args.text_file).read_text(encoding="utf-8")
     if text.endswith("\n"):
