@@ -125,9 +125,7 @@ python3 gui_flow.py discord careful
 3. **学習の保存**: 正解座標（`input_click`）とフレーム（`learned_frame`）を `config.local.json` へ書き込みます。書き込み前に `config.local.json.bak-<日時>` のバックアップを取り、学習記録を `tools/gui_flow/learned_cases.jsonl`（git 管理外）へ 1 行ずつ追記します（日時・アプリ・項目・旧値・新値・理由）。
 4. **自己確認**: 固定文（設定で変更可能）で「入力 → 検閲 → 空に戻す」を実行し、正常系に戻ったことを証明します。結果 JSON には `learned`（旧値→新値）、`self_check`（合否）、`screenshot`（代表キャプチャのパス）が入ります。
 
-**高速パスからの接続**: `post` / `input` / `send` の停止理由が座標・形状の疑い（検閲の座標系チェック＝欄の状態・本文照合・読み戻しだけが落ちた／入力しても欄が空のまま／ウィンドウフレームが学習値から許容差超でずれた）の場合、結果 JSON の `error` は `needs_calibration` になり、`checks` の `calibration` 項目に疑いの内容が残ります。これが careful を呼ぶ合図です。宛先違い・欄の残り・構造エラーは学習対象にせず、従来通り人の慎重プロセスへ回します。ただし `post` で失敗が `fail_readback_empty` のみで、ウィンドウフレームが学習値と一致している場合は座標ズレではなくアプリ無応答の疑いとして `error=app_unresponsive_suspect` になり、アプリの再起動を推奨します（`needs_calibration` にはしません）。
-
-なお、`ad_flow`（agent-desktop 版）は読み取り専用で、その `post` は封鎖されています。送信は gui_flow 一本です。
+**高速パスからの接続**: `post` / `input` / `send` の停止理由が座標・形状の疑い（検閲の座標系チェック＝欄の状態・本文照合・読み戻しだけが落ちた／入力しても欄が空のまま／ウィンドウフレームが学習値から許容差超でずれた）の場合、結果 JSON の `error` は `needs_calibration` になり、`checks` の `calibration` 項目に疑いの内容が残ります。これが careful を呼ぶ合図です。宛先違い・欄の残り・構造エラーは学習対象にせず、従来通り人の慎重プロセスへ回します。
 
 ### 未知の宛先の再学習フロー（`careful --to <宛先>`）
 
@@ -157,21 +155,13 @@ python3 gui_flow.py discord careful
 | `long_line_threshold` | 0.75 | 通常行の一致しきい値 |
 | `short_line_max_len` | 8 | 「短い行」とみなす最大文字数（空白除去後） |
 | `leak_threshold` | 0.5 | 送信後検閲で「欄に本文が残っている」とみなす一致度 |
-| `talk_list_width_ratio` | 0.32 | トーク一覧とみなす横範囲（窓幅比）。再学習では一覧／ヘッダ領域の境界として使う（verify/post での使われ方は安全原則「宛先確認はヘッダ帯の切り出し OCR 専用」参照）。`apps.<app>` の同名キーでアプリ別に上書き可（一覧の幅はアプリのレイアウト依存。例: LINE は 0.27、Discord も 0.27＝1440pt 窓で切り出し左端が約 389pt となり、ヘッダ名の開始位置より左に収まる） |
-| `header_candidate_expansion`（`apps.<app>` 直下） | 無効（キー無し） | 真のアプリでのみ有効になる、ヘッダ宛先判定の候補拡張の有無（拡張の内容・対象ケース・証跡の留保は安全原則「宛先確認はヘッダ帯の切り出し OCR 専用」参照）。Discord のみ `true`（`config.example.json` 参照） |
-| `relearn_header_max_y` | 260 | 「ヘッダ」とみなす縦範囲（窓相対 px）。再学習ではヘッダ領域の上限、verify/post では切り出し帯の高さ（窓フレーム高で換算）のフォールバックとして使うキー（verify/post の切り出し高さは `header_verify_crop_max_y` で個別に上書き可。verify/post の判定方式は安全原則「宛先確認はヘッダ帯の切り出し OCR 専用」参照） |
-| `header_verify_crop_max_y`（`apps.<app>` 直下 / `tunables` どちらでも可） | 無し（未設定なら従来通り `relearn_header_max_y` の解決結果） | verify / post のヘッダ帯切り出しの高さ（窓相対 pt、窓フレーム高で換算）だけを上書きするキー。解決順は `apps.<app>` の同キー → `tunables` の同キー → `apps.<app>` の `relearn_header_max_y` → `tunables` の同キー → 既定 260 の順で最優先。再学習のヘッダ領域には影響しない。LINE では宛先名が窓上端から約 50–75pt にあり、100pt の帯ならメッセージ欄を含まないため、複数行の入力でメッセージ欄がずれても名前の読みがぶれない（`config.example.json` の line 節で 100 を例示）。判定方式は安全原則「宛先確認はヘッダ帯の切り出し OCR 専用」参照 |
+| `talk_list_width_ratio` | 0.32 | トーク一覧とみなす横範囲（窓幅比）。再学習では一覧／ヘッダ領域の境界、verify/post ではヘッダ帯切り出しの左端として共有。`apps.<app>` の同名キーでアプリ別に上書き可（一覧の幅はアプリのレイアウト依存。例: LINE は 0.27、Discord も 0.27＝1440pt 窓で切り出し左端が約 389pt となり、ヘッダ名の開始位置より左に収まる） |
+| `header_candidate_expansion`（`apps.<app>` 直下） | 無効（キー無し） | 真のアプリでのみ、ヘッダ宛先判定の候補を run 群に加えて OCR 項目と空白区切り第 1 トークンへ拡張する。Discord のみ `true`（`config.example.json` 参照） |
+| `relearn_header_max_y` | 260 | 「ヘッダ」とみなす縦範囲（窓相対 px）。再学習ではヘッダ領域の上限、verify/post では切り出し帯の高さ（窓フレーム高で換算）のフォールバックとして使うキー（verify/post の切り出し高さは `header_verify_crop_max_y` で個別に上書き可） |
+| `header_verify_crop_max_y`（`apps.<app>` 直下 / `tunables` どちらでも可） | 無し（未設定なら従来通り `relearn_header_max_y` の解決結果） | verify / post のヘッダ帯切り出しの高さ（窓相対 pt、窓フレーム高で換算）だけを上書きするキー。解決順は `apps.<app>` の同キー → `tunables` の同キー → `apps.<app>` の `relearn_header_max_y` → `tunables` の同キー → 既定 260 の順で最優先。再学習のヘッダ領域には影響しない。LINE では宛先名が窓上端から約 50–75pt にあり、100pt の帯ならメッセージ欄を含まないため、複数行の入力でメッセージ欄がずれても名前の読みがぶれない（`config.example.json` の line 節で 100 を例示） |
 | `relearn_header_prefix_max_extra` | 2 | ヘッダ確認で前方一致を許す余りの最大文字数。**再学習と verify/post のヘッダ確認で共有**するキー（verify/post 用の新規キーは作らない） |
-| `talk_row_merge_px` | 12 | 行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px）。再学習と verify/post のヘッダ確認の run 化で共有（verify/post 側の判定方式は安全原則「宛先確認はヘッダ帯の切り出し OCR 専用」参照） |
+| `talk_row_merge_px` | 12 | 行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px）。再学習と verify/post のヘッダ確認の run 化で共有 |
 | `nav_scrutiny_row_tolerance_px` | 36 | nav 精査で、保存済み `nav_click` と宛先本人の行を「同じ行」とみなす縦座標差の許容差（px）。行間隔（約 72px）の半分で、隣の行は別人の行として検出できる値 |
-| `verify_anchor_top_offset` | 45 | 検閲（run_verify_checks）のアンカー帯の上端オフセット（アンカー行の y から上に取る px） |
-| `verify_anchor_bottom_offset` | 60 | 同アンカー帯の下端の基本オフセット（アンカー行の y から下に取る px） |
-| `verify_anchor_line_step` | 30 | 同アンカー帯の下端へ期待文 1 行ごとに加える px |
-| `verify_leak_band_offset` | 10 | 送信後検閲で「欄付近の帯」とみなす下端からの余白（px）。この帯より下の行を残留判定の対象にする |
-| `verify_field_bottom_margin` | 110 | 送信後検閲で、窓下端からこの px 以内を欄付近とみなし残留判定の対象に含める |
-| `ocr_row_granularity_px` | 8 | OCR 項目（parse_ocr）の行ソートで y を丸める粒度（px）。既定値のみコード側で参照 |
-| `png_diff_pixel_threshold` | 24 | 画面差分（png_diff_ratio）で、輝度加重した画素差がこの値を超えた画素を「大きく変わった」と数える（既定引数の値） |
-| `png_luminance_weights` | `[30, 59, 11]` | PNG のグレースケール化（_png_gray_rows）の RGB 加重（百分率、合計 100 で割る）。既定値のみコード側で参照 |
 
 ### アプリ別 `careful`（慎重モードの調整値）
 

@@ -1,12 +1,9 @@
 name: custom.mac-playwright
 display_name: Mac Playwright
 description: >-
-  DISABLED since 2026-11-04 by the user's explicit instruction: do not use,
-  restart, or re-enable unless the user himself explicitly asks to lift the
-  ban. Historical record only: browser control on the user's own MacBook Air
-  via a Playwright MCP server bound to the Mac's Tailscale address. Local
-  setup, no third-party credential; reachability is gated by the user's
-  private tailnet.
+  Browser control on the user's own MacBook Air via a Playwright MCP server
+  bound to the Mac's Tailscale address. Local setup, no third-party
+  credential; reachability is gated by the user's private tailnet.
 transport: mcp-streamable-http
 endpoint: http://<MacのTailscale IP>:8931/mcp
 client: bin/client.py

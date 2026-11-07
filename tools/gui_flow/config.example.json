@@ -29,6 +29,8 @@
         "self_check_text": ""
       },
       "default_recipient": "example-dm-name",
+      "field_from_bottom": 90,
+      "header_band": 110,
       "header_candidate_expansion": true,
       "input_click": [
         700,
@@ -53,14 +55,7 @@
         }
       },
       "talk_list_width_ratio": 0.27,
-      "window_app": "Discord",
-      "home_click": [
-        36,
-        83
-      ],
-      "ad_home_names": [
-        "ダイレクトメッセージ"
-      ]
+      "window_app": "Discord"
     },
     "line": {
       "app_name": "LINE",
@@ -91,6 +86,8 @@
         "self_check_text": ""
       },
       "default_recipient": "example-talk-name",
+      "field_from_bottom": 160,
+      "header_band": 110,
       "header_verify_crop_max_y": 100,
       "input_click": [
         800,
@@ -134,14 +131,7 @@
     "long_line_threshold": 0.75,
     "max_pre_send_retries": 2,
     "nav_scrutiny_row_tolerance_px": 36,
-    "ocr_row_granularity_px": 8,
     "ocr_threshold": 0.8,
-    "png_diff_pixel_threshold": 24,
-    "png_luminance_weights": [
-      30,
-      59,
-      11
-    ],
     "post_send_wait": 1.0,
     "relearn_header_max_y": 260,
     "relearn_header_prefix_max_extra": 2,
@@ -150,11 +140,6 @@
     "ssh_timeout": 240,
     "strong_threshold": 0.8,
     "talk_list_width_ratio": 0.32,
-    "talk_row_merge_px": 12,
-    "verify_anchor_bottom_offset": 60,
-    "verify_anchor_line_step": 30,
-    "verify_anchor_top_offset": 45,
-    "verify_field_bottom_margin": 110,
-    "verify_leak_band_offset": 10
+    "talk_row_merge_px": 12
   }
 }

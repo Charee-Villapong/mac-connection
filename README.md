@@ -16,8 +16,8 @@
 - **tools/gui_flow/** — LINE / Discord の送信を 1 回の呼び出しで一気通貫実行する Python CLI（詳細は tools/gui_flow/README.md）
 - **scripts/** — 接続用スクリプト、作業ログ窓、省電力設定、OSアップデート用など
   - 接続先などの実値はコードに直書きせず、.gitignore 対象の config.local.sh から読み込む構造（テンプレート config.local.example.sh のみ公開）
-- **guide/** — 設定ガイドの原稿（HTML）とプレビュー画像（完成版 PDF の正規の置き場はリポジトリ直下。guide/ 内にも同名 PDF が同居する二重配置の現状については guide/README.md 参照）
-- **connectors/** — Mac のブラウザ操作（Playwright MCP、2026-11-04 から無効化）の接続メモ
+- **guide/** — 設定ガイドの原稿（HTML）とプレビュー画像
+- **connectors/** — Mac のブラウザ操作（Playwright MCP）の接続メモ
 - スクリーンショット類は公開対象外（手元でのみ保管）
 
 ## 同期の流れ

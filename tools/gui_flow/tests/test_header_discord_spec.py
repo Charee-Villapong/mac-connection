@@ -79,6 +79,7 @@ BARE_ACFG = {
     "input_click": [700, 852],
     "nav_click": [174, 350],
     "recipient_aliases": ["example-dm"],
+    "header_band": 110,
 }
 
 

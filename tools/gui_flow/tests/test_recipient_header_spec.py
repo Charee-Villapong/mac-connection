@@ -79,6 +79,7 @@ def line_acfg(aliases=None, **overrides):
         "input_click": [800, 780],
         "nav_click": [210, 160],
         "recipient_aliases": list(aliases) if aliases else [ALIAS],
+        "header_band": 110,
     }
     acfg.update(overrides)
     return acfg
@@ -92,6 +93,7 @@ def discord_acfg(aliases=None, **overrides):
         "input_click": [800, 780],
         "nav_click": [210, 160],
         "recipient_aliases": list(aliases) if aliases else [ALIAS],
+        "header_band": 110,
     }
     acfg.update(overrides)
     return acfg

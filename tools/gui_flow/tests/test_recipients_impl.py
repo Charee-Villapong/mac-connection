@@ -29,6 +29,7 @@ LINE_APP = {
     "window_app": "LINE",
     "process": "LINE",
     "input_click": [800, 780],
+    "header_band": 110,
     "default_recipient": "example-default",
     "recipients": {
         "example-default": {
