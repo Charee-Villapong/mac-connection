@@ -1,5 +1,16 @@
 # Mac Playwright (custom.mac-playwright)
 
+> **⛔ DISABLED — 2026-11-04, by the user's explicit instruction.**
+> The user decided Muse must not operate any browser on his PC (abuse-risk
+> concern). Enforcement is physical, not just a rule: on 2026-11-04 the
+> launchd agent `com.muse.playwright-mcp` was disabled
+> (`launchctl disable`) and booted out, the server was stopped (port 8931
+> closed), and the leftover dedicated-profile Chrome processes were closed.
+> **Do NOT use this connector, do NOT restart the server, and do NOT
+> re-enable the agent unless the user himself explicitly asks to lift the
+> ban.** The rest of this document is kept only as a record of how it was
+> set up.
+
 Drives a browser on the user's own MacBook Air through a Playwright MCP
 server that runs on that Mac. Set up 2026-11-02 at the user's request,
 following the "home PC over Tailscale" pattern: the VM joins his tailnet
@@ -7,19 +18,26 @@ following the "home PC over Tailscale" pattern: the VM joins his tailnet
 control. Access is limited to the tailnet; nothing is exposed to the LAN
 or the internet.
 
+The standard route for GUI sending is now `gui_flow.py`, which operates
+the native LINE / Discord apps (see `tools/gui_flow/README.md`). This
+connector is not that route: browser operation on the Mac is disabled as
+noted above.
+
 ## The machine
 
-- MacBook Air, Apple M1, macOS 15.3.2. Tailscale name
+- MacBook Air, Apple M1, macOS 27.2 (26B123). Tailscale name
   `<MacのTailscale名>`, tailnet IPv4 `<MacのTailscale IP>`.
 - SSH: user `<ユーザー名>`, key auth with the VM's default key.
   Use `~/workspace/.bin/mac-ssh '<command>'` (the exec shell runs as root,
   so the identity file must be explicit; the wrapper handles that and the
   Tailscale proxy).
-- The Mac is set to never sleep while on AC power and to keep its display
-  on (user-set 2026-11-02). It must stay plugged in and the lid open to be
+- The Mac is set to never sleep while on AC power (user-set 2026-11-02).
+  Display sleep is separate: the display turns off after 5 minutes on AC
+  power and after 2 minutes on battery (set 2026-11-02), and turning off
+  leads to the lock screen, so GUI work is blocked until the user unlocks
+  after a long idle period. It must stay plugged in and the lid open to be
   reachable.
-- **Disk is nearly full (about 2 GB free of 228 GB).** Keep installs small
-  and mention it if work needs real space.
+- Disk: the Data volume had about 60 GB free as measured on 2026-11-07.
 
 ## The server (on the Mac)
 
@@ -34,10 +52,14 @@ or the internet.
 - It runs his installed Google Chrome with a **dedicated profile**
   (`~/muse-tools/pw-profile`), never his personal Chrome profile. Logins
   made in this browser persist in that profile across sessions.
-- Supervised by launchd: `~/Library/LaunchAgents/com.muse.playwright-mcp.plist`
-  (RunAtLoad + KeepAlive). Restart with
-  `launchctl unload/load ~/Library/LaunchAgents/com.muse.playwright-mcp.plist`.
-- Endpoint: `http://<MacのTailscale IP>:8931/mcp` (Streamable HTTP). The server
+- At setup time (2026-11-02) it was supervised by launchd:
+  `~/Library/LaunchAgents/com.muse.playwright-mcp.plist`
+  (RunAtLoad + KeepAlive). As of 2026-11-04 that agent is disabled and
+  booted out, the server is stopped, and the port is closed (see the
+  banner at the top). Do not restart or reload it unless the user himself
+  explicitly asks to lift the ban.
+- Endpoint (historical, while it was enabled):
+  `http://<MacのTailscale IP>:8931/mcp` (Streamable HTTP). The server
   log is `~/muse-tools/playwright-mcp/launchd.log`.
 
 ## The client (on this VM)
@@ -77,9 +99,12 @@ python3 ~/workspace/custom-connectors/custom.mac-playwright/bin/client.py run-ba
   `for p in $(pgrep -f "Google Chrome.*pw-profile"); do kill $p; done`
   (Match on the profile path; never kill his personal Chrome, which runs
   with a different profile.)
-- Server not listening: check `launchctl list | grep muse` and the log on
-  the Mac; reload the launchd agent. Tailscale down on either side also
-  breaks the path (`/opt/hatch/bin/tailscale status` on the VM).
+- Server not listening: while this connector is disabled (since
+  2026-11-04) that is the normal state, not a failure to recover from.
+  Do not reload the launchd agent. Only if the user himself explicitly
+  asks to lift the ban, check `launchctl list | grep muse` and the log on
+  the Mac as part of that re-enabling work. Tailscale down on either side
+  also breaks the path (`/opt/hatch/bin/tailscale status` on the VM).
 
 ## Verified
 
@@ -88,3 +113,6 @@ python3 ~/workspace/custom-connectors/custom.mac-playwright/bin/client.py run-ba
   succeeded from the VM, twice back-to-back via `run-batch` with no
   leftover browser process. `browser_take_screenshot` and the interactive
   tools are allow-listed but not yet exercised.
+- 2026-11-04: Disabled at the user's explicit instruction (see the banner
+  at the top): the launchd agent was disabled and booted out, the server
+  was stopped, and the port was closed.
