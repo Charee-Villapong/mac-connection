@@ -1075,6 +1075,30 @@ AWK_SELECT = r"""awk -v app="$APP" '
 END { print line }'"""
 
 
+def _window_capture_lines(acfg, say_window):
+    """撮影系 builder の共通部: 窓選択 → 撮影 → 失敗判定の行リスト。
+
+    対象アプリ最大の表示中ウィンドウを AWK_SELECT で選び、ScreenCheck
+    で撮影する。窓が無ければ window_not_found、撮影できなければ
+    capture_failed で停止する行までを含む (C-027 で共通化)。
+    say_window は窓情報を結果へ出すか (snapshot は現行どおり出さない)。
+    戻り値の行を parts へ extend すると現行スクリプトと同一になる。
+    """
+    lines = []
+    lines.append('APP="%s"' % acfg["window_app"])
+    lines.append("WIN=$($SC list | %s)" % AWK_SELECT)
+    lines.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
+    if say_window:
+        lines.append('say "window=$WIN"')
+    lines.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
+    lines.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
+    lines.append(
+        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
+        'say "status=capture_failed"; exit 0; fi'
+    )
+    return lines
+
+
 def _script_number(value):
     """スクリプト本文へ埋める数値リテラルの整形 (260.0 -> "260")。"""
     try:
@@ -1126,16 +1150,7 @@ def build_verify_script(name, app, acfg, tun=None):
         "~/muse-tools/gf-out/__NAME__-header-ocr.txt "
         "~/muse-tools/gf-out/__NAME__-header.png"
     )
-    parts.append('APP="%s"' % acfg["window_app"])
-    parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
-    parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
-    parts.append('say "window=$WIN"')
-    parts.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
-    parts.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
-    parts.append(
-        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
-        'say "status=capture_failed"; exit 0; fi'
-    )
+    parts.extend(_window_capture_lines(acfg, say_window=True))
     parts.append(
         "base64 -i ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-png.b64"
@@ -1200,16 +1215,7 @@ def build_capture_script(name, app, acfg):
     OCR はしない。
     """
     parts = [HDR]
-    parts.append('APP="%s"' % acfg["window_app"])
-    parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
-    parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
-    parts.append('say "window=$WIN"')
-    parts.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
-    parts.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
-    parts.append(
-        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
-        'say "status=capture_failed"; exit 0; fi'
-    )
+    parts.extend(_window_capture_lines(acfg, say_window=True))
     parts.append(
         "base64 -i ~/muse-tools/gf-out/__NAME__.png "
         "> ~/muse-tools/gf-out/__NAME__-png.b64"
@@ -1225,15 +1231,7 @@ def build_snapshot_script(name, app, acfg, width):
     ためのもの。OCR はしない。
     """
     parts = [HDR]
-    parts.append('APP="%s"' % acfg["window_app"])
-    parts.append("WIN=$($SC list | %s)" % AWK_SELECT)
-    parts.append('if [ -z "$WIN" ]; then say "status=window_not_found"; exit 0; fi')
-    parts.append('WID=$(printf %s "$WIN" | cut -d" " -f1)')
-    parts.append("$SC cap $WID ~/muse-tools/gf-out/__NAME__.png")
-    parts.append(
-        "if [ ! -s ~/muse-tools/gf-out/__NAME__.png ]; then "
-        'say "status=capture_failed"; exit 0; fi'
-    )
+    parts.extend(_window_capture_lines(acfg, say_window=False))
     parts.append(
         "sips -Z %d ~/muse-tools/gf-out/__NAME__.png "
         "--out ~/muse-tools/gf-out/__NAME__-thumb.png >/dev/null 2>&1" % int(width)
@@ -1977,6 +1975,20 @@ def run_post(r, text, max_retries=MAX_PRE_SEND_RETRIES, on_sent=None):
 # --- フェーズ実行 ---------------------------------------------------------------
 
 
+def _parse_window(res):
+    """キュー結果の window 文字列を (win, frame) に変換する (C-027)。
+
+    win は "id x y w h" を数値化したタプル、frame は win[1:5]
+    (x, y, w, h)。window キーが無い場合は現行どおり "0 0 0 0 0"
+    として扱うため、frame は None でなく (0, 0, 0, 0) になる
+    (この非対称は現行挙動として維持する)。要素数が 5 でない
+    場合の frame は None。
+    """
+    win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
+    frame = win[1:5] if len(win) == 5 else None
+    return win, frame
+
+
 class Runner:
     def __init__(self, cfg, app, to=None):
         self.cfg = cfg
@@ -2290,9 +2302,9 @@ class Runner:
                 self.last_png_bytes = decode_b64_bytes(
                     res.get("_files", {}).get("-png.b64", "")
                 )
-            win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
-            if len(win) == 5:
-                self.last_frame = win[1:5]
+            win, frame = _parse_window(res)
+            if frame is not None:
+                self.last_frame = frame
             ocr_text = res.get("_files", {}).get("-ocr.txt", "")
             vchecks = run_verify_checks(
                 self.app, self.acfg, ocr_text, win, text, mode, tun=self.tunables
@@ -2362,19 +2374,28 @@ class Runner:
         self.checks.extend(final_checks)
         return all(c["ok"] for c in final_checks)
 
+    def _capture_via_queue(self, action, build, extras=()):
+        """撮影系フェーズの共通キュー投入 (C-027 で共通化)。
+
+        build はキュー名を受け取ってスクリプト文字列を返す callable。
+        名前付け (_name) と所要計測 (_timed、ラベルは撮影系共通の
+        "capture") をここに集約し、呼び出し側は撮影後の処理だけを持つ。
+        """
+        name = self._name(action)
+        return self._timed(
+            "capture",
+            lambda: self.mac.run_queue(build(name), name, extras=extras),
+        )
+
     def capture_png(self):
         """対象ウィンドウを撮影だけし、PNG を last_png_bytes に取り込む。
 
         単独 send の送信後スクショ用。成功したら True。
         """
-        name = self._name("capture")
-        res = self._timed(
+        res = self._capture_via_queue(
             "capture",
-            lambda: self.mac.run_queue(
-                build_capture_script(name, self.app, self.acfg),
-                name,
-                extras=("-png.b64",),
-            ),
+            lambda name: build_capture_script(name, self.app, self.acfg),
+            extras=("-png.b64",),
         )
         if res.get("status") != "ok":
             return False
@@ -2451,14 +2472,10 @@ class Runner:
 
         失敗したら (None, None)。結果は checks の careful_capture に残す。
         """
-        name = self._name("capture")
-        res = self._timed(
+        res = self._capture_via_queue(
             "capture",
-            lambda: self.mac.run_queue(
-                build_capture_script(name, self.app, self.acfg),
-                name,
-                extras=("-png.b64",),
-            ),
+            lambda name: build_capture_script(name, self.app, self.acfg),
+            extras=("-png.b64",),
         )
         if res.get("status") != "ok":
             self.checks.append(
@@ -2470,8 +2487,7 @@ class Runner:
                 }
             )
             return None, None
-        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
-        frame = win[1:5] if len(win) == 5 else None
+        _win, frame = _parse_window(res)
         if frame:
             self.last_frame = frame
         png = decode_b64_bytes(res.get("_files", {}).get("-png.b64", ""))
@@ -2675,19 +2691,16 @@ class Runner:
         撮影・OCR ができなければ (None, [])。checks には積まない
         (呼び出し側が文脈に合ったチェック名で記録する)。
         """
-        name = self._name("verify")
-        res = self._timed(
-            "capture",
-            lambda: self.mac.run_queue(
-                build_verify_script(name, self.app, self.acfg, tun=self.tunables),
-                name,
-                extras=("-ocr.txt",),
+        res = self._capture_via_queue(
+            "verify",
+            lambda name: build_verify_script(
+                name, self.app, self.acfg, tun=self.tunables
             ),
+            extras=("-ocr.txt",),
         )
         if res.get("status") != "ok":
             return None, []
-        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
-        frame = win[1:5] if len(win) == 5 else None
+        _win, frame = _parse_window(res)
         if frame:
             self.last_frame = frame
         return frame, parse_ocr(res.get("_files", {}).get("-ocr.txt", ""))
@@ -2706,19 +2719,16 @@ class Runner:
         保持する (候補拡張が有効なアプリで項目候補を作るため)。
         """
         self._last_header_items = []
-        name = self._name("verify")
-        res = self._timed(
-            "capture",
-            lambda: self.mac.run_queue(
-                build_verify_script(name, self.app, self.acfg, tun=self.tunables),
-                name,
-                extras=("-header-ocr.txt",),
+        res = self._capture_via_queue(
+            "verify",
+            lambda name: build_verify_script(
+                name, self.app, self.acfg, tun=self.tunables
             ),
+            extras=("-header-ocr.txt",),
         )
         if res.get("status") != "ok":
             return None, []
-        win = tuple(int(float(v)) for v in res.get("window", "0 0 0 0 0").split())
-        frame = win[1:5] if len(win) == 5 else None
+        _win, frame = _parse_window(res)
         if frame:
             self.last_frame = frame
         items = parse_ocr(res.get("_files", {}).get("-header-ocr.txt", ""))
