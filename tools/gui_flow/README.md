@@ -162,6 +162,14 @@ python3 gui_flow.py discord careful
 | `relearn_header_prefix_max_extra` | 2 | ヘッダ確認で前方一致を許す余りの最大文字数。**再学習と verify/post のヘッダ確認で共有**するキー（verify/post 用の新規キーは作らない） |
 | `talk_row_merge_px` | 12 | 行判定（同じ行とみなす縦間隔と、横に連続した文字列とみなす横間隔、px）。再学習と verify/post のヘッダ確認の run 化で共有 |
 | `nav_scrutiny_row_tolerance_px` | 36 | nav 精査で、保存済み `nav_click` と宛先本人の行を「同じ行」とみなす縦座標差の許容差（px）。行間隔（約 72px）の半分で、隣の行は別人の行として検出できる値 |
+| `verify_anchor_top_offset` | 45 | 検閲（run_verify_checks）のアンカー帯の上端オフセット（アンカー行の y から上に取る px） |
+| `verify_anchor_bottom_offset` | 60 | 同アンカー帯の下端の基本オフセット（アンカー行の y から下に取る px） |
+| `verify_anchor_line_step` | 30 | 同アンカー帯の下端へ期待文 1 行ごとに加える px |
+| `verify_leak_band_offset` | 10 | 送信後検閲で「欄付近の帯」とみなす下端からの余白（px）。この帯より下の行を残留判定の対象にする |
+| `verify_field_bottom_margin` | 110 | 送信後検閲で、窓下端からこの px 以内を欄付近とみなし残留判定の対象に含める |
+| `ocr_row_granularity_px` | 8 | OCR 項目（parse_ocr）の行ソートで y を丸める粒度（px）。既定値のみコード側で参照 |
+| `png_diff_pixel_threshold` | 24 | 画面差分（png_diff_ratio）で、輝度加重した画素差がこの値を超えた画素を「大きく変わった」と数える（既定引数の値） |
+| `png_luminance_weights` | `[30, 59, 11]` | PNG のグレースケール化（_png_gray_rows）の RGB 加重（百分率、合計 100 で割る）。既定値のみコード側で参照 |
 
 ### アプリ別 `careful`（慎重モードの調整値）
 

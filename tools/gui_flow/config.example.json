@@ -131,7 +131,14 @@
     "long_line_threshold": 0.75,
     "max_pre_send_retries": 2,
     "nav_scrutiny_row_tolerance_px": 36,
+    "ocr_row_granularity_px": 8,
     "ocr_threshold": 0.8,
+    "png_diff_pixel_threshold": 24,
+    "png_luminance_weights": [
+      30,
+      59,
+      11
+    ],
     "post_send_wait": 1.0,
     "relearn_header_max_y": 260,
     "relearn_header_prefix_max_extra": 2,
@@ -140,6 +147,11 @@
     "ssh_timeout": 240,
     "strong_threshold": 0.8,
     "talk_list_width_ratio": 0.32,
-    "talk_row_merge_px": 12
+    "talk_row_merge_px": 12,
+    "verify_anchor_bottom_offset": 60,
+    "verify_anchor_line_step": 30,
+    "verify_anchor_top_offset": 45,
+    "verify_field_bottom_margin": 110,
+    "verify_leak_band_offset": 10
   }
 }
