@@ -32,7 +32,6 @@ CFG = {
             "input_click": [700, 852],
             "nav_click": [174, 350],
             "recipient_aliases": ["example-dm"],
-            "header_band": 110,
         },
         "line": {
             "app_name": "LINE",
@@ -41,7 +40,6 @@ CFG = {
             "input_click": [800, 780],
             "nav_click": [210, 160],
             "recipient_aliases": ["example-talk"],
-            "header_band": 110,
         },
     },
 }

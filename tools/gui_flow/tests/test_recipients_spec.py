@@ -56,7 +56,6 @@ def make_cfg():
                 "window_app": "Discord",
                 "process": "Discord",
                 "input_click": [700, 852],
-                "header_band": 110,
                 "learned_frame": [0, 30, 1440, 870],
                 "default_recipient": "alice",
                 "recipients": {
@@ -69,7 +68,6 @@ def make_cfg():
                 "window_app": "LINE",
                 "process": "LINE",
                 "input_click": [800, 780],
-                "header_band": 110,
                 "learned_frame": [0, 30, 1440, 870],
                 "default_recipient": "kei",
                 "recipients": {
@@ -161,7 +159,6 @@ def test_old_format_config_reads_as_single_default_recipient():
         "input_click": [700, 852],
         "nav_click": [174, 350],
         "recipient_aliases": ["example-dm"],
-        "header_band": 110,
     }
     recipients, default_id = gui_flow.recipients_of(old)
     assert default_id == "example-dm"

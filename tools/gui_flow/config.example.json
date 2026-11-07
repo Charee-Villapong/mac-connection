@@ -29,8 +29,6 @@
         "self_check_text": ""
       },
       "default_recipient": "example-dm-name",
-      "field_from_bottom": 90,
-      "header_band": 110,
       "header_candidate_expansion": true,
       "input_click": [
         700,
@@ -86,8 +84,6 @@
         "self_check_text": ""
       },
       "default_recipient": "example-talk-name",
-      "field_from_bottom": 160,
-      "header_band": 110,
       "header_verify_crop_max_y": 100,
       "input_click": [
         800,

@@ -116,7 +116,6 @@ BARE_ACFG = {
     "input_click": [700, 852],
     "nav_click": [174, 350],
     "recipient_aliases": ["example-dm"],
-    "header_band": 110,
 }
 
 
@@ -143,7 +142,6 @@ def make_cfg(tunables=None):
                 "window_app": "LINE",
                 "process": "LINE",
                 "input_click": [800, 780],
-                "header_band": 110,
                 "default_recipient": TARGET,
                 "recipients": recipients,
             },
@@ -152,7 +150,6 @@ def make_cfg(tunables=None):
                 "window_app": "Discord",
                 "process": "Discord",
                 "input_click": [700, 852],
-                "header_band": 110,
                 "default_recipient": TARGET,
                 "recipients": recipients,
             },

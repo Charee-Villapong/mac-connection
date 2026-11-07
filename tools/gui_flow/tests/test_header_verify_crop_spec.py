@@ -57,7 +57,6 @@ BARE_DISCORD_ACFG = {
     "input_click": [700, 852],
     "nav_click": [174, 350],
     "recipient_aliases": ["example-dm"],
-    "header_band": 110,
 }
 
 BARE_LINE_ACFG = {
@@ -67,7 +66,6 @@ BARE_LINE_ACFG = {
     "input_click": [800, 780],
     "nav_click": [210, 160],
     "recipient_aliases": ["example-dm"],
-    "header_band": 110,
 }
 
 _MAX_Y_RE = re.compile(r"max_y=(\d+(?:\.\d+)?)")

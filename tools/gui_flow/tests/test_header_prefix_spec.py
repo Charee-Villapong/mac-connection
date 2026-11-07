@@ -75,7 +75,6 @@ def _app_cfg(label, default_id):
         "window_app": label,
         "process": label,
         "input_click": [800, 780] if label == "LINE" else [700, 852],
-        "header_band": 110,
         "default_recipient": default_id,
         "recipients": {
             default_id: {"aliases": [default_id], "nav_click": [100, 120]},
