@@ -797,6 +797,41 @@ def b64(s):
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
 
+def _sentinel_rotation_lines(
+    sentinel_var=None,
+    sentinel_value=None,
+    capture_var="PB",
+    indent="",
+    select_sleep="0.25",
+    copy_sleep="0.3",
+    between=(),
+):
+    """センチネル回転 (生成スクリプト共通手順) の行リストを返す。
+
+    手順: センチネルを pbcopy でクリップボードへ置く → 全選択
+    (keyf 0 cmd) → コピー (keyf 8 cmd) → pbpaste で回収する。
+    欄が空なら回収値はセンチネルのままになることを利用して、欄の
+    空・残りをデータで確認するのがこの回転の目的 (C-026 で共通化)。
+    sentinel_var が None の場合は定義行を出さず、既存の $SENT を
+    再利用する (probe の try_one / 終了確認)。between は pbcopy の
+    直後・全選択の前に差し込む行 (読み戻し前の欄クリック等)。
+    select_sleep / copy_sleep はキー送信後の待ち (現行値が既定)。
+    戻り値の行を parts へ extend すると現行スクリプトと同一になる。
+    """
+    ref = sentinel_var if sentinel_var is not None else "SENT"
+    lines = []
+    if sentinel_var is not None:
+        lines.append('%s%s="%s"' % (indent, sentinel_var, sentinel_value))
+    lines.append('%sprintf %%s "$%s" | pbcopy' % (indent, ref))
+    lines.extend(between)
+    lines.append("%s$KH keyf 0 cmd pid $PID" % indent)
+    lines.append("%ssleep %s" % (indent, select_sleep))
+    lines.append("%s$KH keyf 8 cmd pid $PID" % indent)
+    lines.append("%ssleep %s" % (indent, copy_sleep))
+    lines.append("%s%s=$(pbpaste)" % (indent, capture_var))
+    return lines
+
+
 def build_input_script(name, app, acfg, text):
     """入力フェーズ: 前面化 → 移動 → 空確認 → 入力 → 読み戻し。
 
@@ -819,13 +854,7 @@ def build_input_script(name, app, acfg, text):
     parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
     parts.append("sleep 0.4")
     # 空確認 (センチネル回転: 欄が空ならクリップボードはセンチネルのまま)
-    parts.append('SENT="GF_SENT_A_9d41"')
-    parts.append('printf %s "$SENT" | pbcopy')
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("PB=$(pbpaste)")
+    parts.extend(_sentinel_rotation_lines("SENT", "GF_SENT_A_9d41"))
     parts.append('if [ "$PB" != "$SENT" ]; then')
     parts.append('  printf %s "$PB" > ~/muse-tools/gf-out/__NAME__-leftover.txt')
     parts.append('  say "leftover_present=yes"')
@@ -848,15 +877,17 @@ def build_input_script(name, app, acfg, text):
         parts.append('$GH type "$TXT"')
         parts.append("sleep 0.3")
     # 読み戻し (データ確認)
-    parts.append('SENT2="GF_SENT_B_71c0"')
-    parts.append('printf %s "$SENT2" | pbcopy')
-    parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
-    parts.append("sleep 0.3")
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("GOT=$(pbpaste)")
+    parts.extend(
+        _sentinel_rotation_lines(
+            "SENT2",
+            "GF_SENT_B_71c0",
+            capture_var="GOT",
+            between=[
+                "$GH click %d %d" % tuple(acfg["input_click"]),
+                "sleep 0.3",
+            ],
+        )
+    )
     parts.append(
         'if [ "$GOT" = "$SENT2" ]; then say "status=fail_readback_empty"; exit 0; fi'
     )
@@ -895,13 +926,7 @@ def build_clear_script(name, app, acfg):
     parts.append("sleep 0.25")
     parts.append("$KH keyf 51 - pid $PID")
     parts.append("sleep 0.3")
-    parts.append('SENT="GF_SENT_C_55e2"')
-    parts.append('printf %s "$SENT" | pbcopy')
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("PB=$(pbpaste)")
+    parts.extend(_sentinel_rotation_lines("SENT", "GF_SENT_C_55e2"))
     parts.append(
         'if [ "$PB" = "$SENT" ]; then say "field_empty=yes"; say "status=ok"; '
         'else say "field_empty=no"; say "status=fail_not_empty"; fi'
@@ -927,13 +952,7 @@ def build_readback_script(name, app, acfg):
     parts.append('if [ -z "$PID" ]; then say "status=app_not_running"; exit 0; fi')
     parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
     parts.append("sleep 0.4")
-    parts.append('SENT="GF_SENT_R_3b77"')
-    parts.append('printf %s "$SENT" | pbcopy')
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("PB=$(pbpaste)")
+    parts.extend(_sentinel_rotation_lines("SENT", "GF_SENT_R_3b77"))
     parts.append('if [ "$PB" = "$SENT" ]; then say "status=field_empty"; exit 0; fi')
     parts.append('printf %s "$PB" > ~/muse-tools/gf-out/__NAME__-field.txt')
     parts.append('say "status=ok"')
@@ -966,13 +985,7 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     # 開始前に欄が空であることを確認 (空でなければ何も触らない)
     parts.append("$GH click %d %d" % tuple(acfg["input_click"]))
     parts.append("sleep 0.4")
-    parts.append('SENT="GF_SENT_P_20d9"')
-    parts.append('printf %s "$SENT" | pbcopy')
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("PB=$(pbpaste)")
+    parts.extend(_sentinel_rotation_lines("SENT", "GF_SENT_P_20d9"))
     parts.append('if [ "$PB" != "$SENT" ]; then')
     parts.append('  printf %s "$PB" > ~/muse-tools/gf-out/__NAME__-leftover.txt')
     parts.append('  say "status=anomaly_leftover"')
@@ -991,12 +1004,9 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     parts.append("  sleep 0.35")
     parts.append('  $GH type "$PROBE"')
     parts.append("  sleep 0.25")
-    parts.append('  printf %s "$SENT" | pbcopy')
-    parts.append("  $KH keyf 0 cmd pid $PID")
-    parts.append("  sleep 0.2")
-    parts.append("  $KH keyf 8 cmd pid $PID")
-    parts.append("  sleep 0.25")
-    parts.append("  PB=$(pbpaste)")
+    parts.extend(
+        _sentinel_rotation_lines(indent="  ", select_sleep="0.2", copy_sleep="0.25")
+    )
     parts.append("  $KH keyf 0 cmd pid $PID")
     parts.append("  sleep 0.15")
     parts.append("  $KH keyf 51 - pid $PID")
@@ -1010,12 +1020,7 @@ def build_probe_script(name, app, acfg, candidates, probe_text):
     parts.append('say "probe_hit=$HIT"')
     parts.append('if [ $HIT -ge 0 ]; then say "probe_point=$HX $HY"; fi')
     # 終了時にも欄が空であることをセンチネルで確認する
-    parts.append('printf %s "$SENT" | pbcopy')
-    parts.append("$KH keyf 0 cmd pid $PID")
-    parts.append("sleep 0.25")
-    parts.append("$KH keyf 8 cmd pid $PID")
-    parts.append("sleep 0.3")
-    parts.append("PB=$(pbpaste)")
+    parts.extend(_sentinel_rotation_lines())
     parts.append(
         'if [ "$PB" = "$SENT" ]; then say "field_empty_after=yes"; '
         'else say "field_empty_after=no"; fi'
