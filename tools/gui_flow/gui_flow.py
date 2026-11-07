@@ -171,6 +171,22 @@ DEFAULT_TUNABLES = {
     "nav_scrutiny_row_tolerance_px": 36,  # nav 精査: 保存済み nav_click と
     # 宛先本人の行を「同じ行」とみなす縦座標差の許容差 (px)。行間隔
     # (約 72px) の半分で、隣の行は別人の行として検出できる値
+    # --- 検閲幾何 (C-034 でコード内の直書きから移した値。既定値と
+    # 計算方式は移行前と同一) ---
+    "verify_anchor_top_offset": 45,  # run_verify_checks: アンカー行の
+    # 上端オフセット (アンカー y から上に取る px)
+    "verify_anchor_bottom_offset": 60,  # 同: アンカー帯の下端の基本
+    # オフセット (アンカー y から下に取る px)
+    "verify_anchor_line_step": 30,  # 同: 期待文 1 行ごとに下端へ加える px
+    "verify_leak_band_offset": 10,  # 同: 送信後検閲で「欄付近の帯」と
+    # みなす下端からの余白 (px)。この帯より下の行を残留判定の対象にする
+    "verify_field_bottom_margin": 110,  # 同: 窓下端からこの px 以内を
+    # 欄付近とみなし、残留判定の対象に含める
+    "ocr_row_granularity_px": 8,  # parse_ocr: 行ソートで y を丸める粒度 (px)
+    "png_diff_pixel_threshold": 24,  # png_diff_ratio: 輝度加重した画素差
+    # がこの値を超えた画素を「大きく変わった」と数える (既定引数の値)
+    "png_luminance_weights": [30, 59, 11],  # _png_gray_rows: RGB → 輝度
+    # の加重 (百分率、合計 100 で割る)。R < G < B の順に効きにくい
 }
 
 
@@ -573,6 +589,7 @@ def _png_gray_rows(data):
             return None
         raw = zlib.decompress(idat)
         stride = w * bpp
+        _wr, _wg, _wb = DEFAULT_TUNABLES["png_luminance_weights"]
         rows = []
         prev = bytearray(stride)
         i = 0
@@ -604,7 +621,7 @@ def _png_gray_rows(data):
                 return None
             rows.append(
                 [
-                    (line[x] * 30 + line[x + 1] * 59 + line[x + 2] * 11) // 100
+                    (line[x] * _wr + line[x + 1] * _wg + line[x + 2] * _wb) // 100
                     for x in range(0, stride, bpp)
                 ]
             )
@@ -614,7 +631,9 @@ def _png_gray_rows(data):
         return None
 
 
-def png_diff_ratio(data_a, data_b, pixel_threshold=24):
+def png_diff_ratio(
+    data_a, data_b, pixel_threshold=DEFAULT_TUNABLES["png_diff_pixel_threshold"]
+):
     """2 枚の PNG で大きく変わったピクセルの比率 (0.0–1.0)。
 
     サイズが違えば 1.0、判定不能なら None。覆いの解消前後で「画面が
@@ -1258,7 +1277,12 @@ def parse_ocr(text):
             items.append(
                 {"x": x, "y": y, "w": w, "h": h, "conf": conf, "text": m.group(6)}
             )
-    items.sort(key=lambda d: (round(d["y"] / 8), d["x"]))
+    items.sort(
+        key=lambda d: (
+            round(d["y"] / DEFAULT_TUNABLES["ocr_row_granularity_px"]),
+            d["x"],
+        )
+    )
     return items
 
 
@@ -1657,8 +1681,22 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
             "evidence": "1 行目 = '%s' (最良一致 %.2f)" % (lines[0], best_r),
         }
     )
-    top = anchor["y"] - 45
-    bottom = anchor["y"] + 60 + 30 * len(lines)
+    top = anchor["y"] - tun.get(
+        "verify_anchor_top_offset",
+        DEFAULT_TUNABLES["verify_anchor_top_offset"],
+    )
+    bottom = (
+        anchor["y"]
+        + tun.get(
+            "verify_anchor_bottom_offset",
+            DEFAULT_TUNABLES["verify_anchor_bottom_offset"],
+        )
+        + tun.get(
+            "verify_anchor_line_step",
+            DEFAULT_TUNABLES["verify_anchor_line_step"],
+        )
+        * len(lines)
+    )
     region = [it for it in items if top <= it["y"] <= bottom]
     per_line = []
     all_ok = True
@@ -1702,7 +1740,20 @@ def run_verify_checks(app, acfg, ocr_text, win, expected_text, mode, tun=None):
             }
         )
     else:
-        below = [it for it in items if it["y"] > bottom + 10 or it["y"] >= height - 110]
+        leak_band_offset = tun.get(
+            "verify_leak_band_offset",
+            DEFAULT_TUNABLES["verify_leak_band_offset"],
+        )
+        field_bottom_margin = tun.get(
+            "verify_field_bottom_margin",
+            DEFAULT_TUNABLES["verify_field_bottom_margin"],
+        )
+        below = [
+            it
+            for it in items
+            if it["y"] > bottom + leak_band_offset
+            or it["y"] >= height - field_bottom_margin
+        ]
         leak = (
             any(best_match(ln, below)[1] >= tun["leak_threshold"] for ln in lines)
             if below
@@ -2680,6 +2731,26 @@ class Runner:
         )
         return res.get("status") == "ok"
 
+    def _exact_nav_candidates(self, frame, items, aliases):
+        """トーク一覧の OCR から、宛先エイリアスのいずれかと完全一致する
+        行の候補を (point, text) のリストで返す (座標の重複は除く)。
+
+        scrutinize_nav の探索規則そのもの。ホーム遷移リトライ後の
+        再探索でも同じ規則を使うため、切り出して共有する。
+        """
+        exact = []
+        seen_points = set()
+        for alias in aliases:
+            for x, y, text in self.find_talk_candidates(alias, frame, items):
+                if not any(norm(text) == norm(a) for a in aliases):
+                    continue
+                point = (int(x), int(y))
+                if point in seen_points:
+                    continue
+                seen_points.add(point)
+                exact.append((point, text))
+        return exact
+
     def scrutinize_nav(self):
         """ナビゲーション前の座標精査: 保存済み nav_click が宛先本人の
         行を指しているかを、座標を使う前にトーク一覧の OCR で確認する。
@@ -2699,9 +2770,17 @@ class Runner:
           (書き込み前にバックアップ + 学習記録へ追記。再学習の登録と
           同じ作法)。self.acfg も新しい値に更新し、後段のヘッダ確認・
           入力が新しい座標を使うようにする
+        - 候補 0 件で実効設定に home_click がある場合のみ、救済として
+          ホームボタンへ 1 回だけ遷移し、再撮影して探索をやり直す
+          (アプリが別画面を開いていて一覧が見えていないケース)。
+          再探索で候補が 1 件見つかれば通常の判定に合流する。
+          クリック失敗時は nav_home_click_failed、再撮影不可は
+          nav_scrutiny_unreadable で停止する。試行は checks の
+          nav_home に残す
         - 候補 0 件 / 2 件以上 / 撮影・OCR 不可 / 修正クリック失敗:
           False を返し、self.nav_scrutiny_error に理由を残す
-          (クリックも設定変更もしない。修正クリック失敗時を除く)
+          (クリックも設定変更もしない。修正クリック失敗時と
+          上記のホーム救済時を除く)
         - nav_click 未設定で候補 1 件: それを正として通過扱い
         精査は文字入力・送信キーを絶対に行わない (行を開くクリックのみ)。
         この経路は Runner 共通 (アプリ非依存) で、一覧探索の幅比率は
@@ -2724,17 +2803,68 @@ class Runner:
                 }
             )
             return False
-        exact = []
-        seen_points = set()
-        for alias in aliases:
-            for x, y, text in self.find_talk_candidates(alias, frame, items):
-                if not any(norm(text) == norm(a) for a in aliases):
-                    continue
-                point = (int(x), int(y))
-                if point in seen_points:
-                    continue
-                seen_points.add(point)
-                exact.append((point, text))
+        exact = self._exact_nav_candidates(frame, items, aliases)
+        if not exact:
+            home = self.acfg.get("home_click")
+            if home:
+                # 救済: アプリが別画面 (Discord のサーバー画面など) を開いて
+                # いて DM 一覧が見えていないケース。ホームボタンへ 1 回だけ
+                # 遷移して再探索する。クリックは最大 1 回で、文字入力・
+                # 送信キーは行わない。home_click 未設定なら従来どおり
+                # この救済は発動せず、そのまま未検出で停止する。
+                home_point = tuple(int(v) for v in home)
+                if self.click_point(home_point) is False:
+                    self.checks.append(
+                        {
+                            "name": "nav_home",
+                            "ok": False,
+                            "evidence": "ホームボタン (%d, %d) をクリック"
+                            "できなかったため、再探索せず停止" % home_point,
+                        }
+                    )
+                    self.nav_scrutiny_error = "nav_home_click_failed"
+                    self.checks.append(
+                        {
+                            "name": "nav_scrutiny",
+                            "ok": False,
+                            "evidence": "ホーム遷移のクリックに失敗したため"
+                            " nav_click を精査できない (想定宛先: %s)"
+                            % "/".join(aliases),
+                        }
+                    )
+                    return False
+                frame, items = self.capture_ocr()
+                if frame is None or not items:
+                    self.checks.append(
+                        {
+                            "name": "nav_home",
+                            "ok": False,
+                            "evidence": "ホーム遷移後のトーク一覧を"
+                            "読み取れなかった (撮影・OCR 不可)",
+                        }
+                    )
+                    self.nav_scrutiny_error = "nav_scrutiny_unreadable"
+                    self.checks.append(
+                        {
+                            "name": "nav_scrutiny",
+                            "ok": False,
+                            "evidence": "ホーム遷移後にトーク一覧を"
+                            "読み取れなかった (撮影・OCR ができず "
+                            "nav_click を精査できない / 想定宛先: %s)"
+                            % "/".join(aliases),
+                        }
+                    )
+                    return False
+                exact = self._exact_nav_candidates(frame, items, aliases)
+                self.checks.append(
+                    {
+                        "name": "nav_home",
+                        "ok": bool(exact),
+                        "evidence": "ホームボタン (%d, %d) へ遷移して"
+                        "再探索した (完全一致候補 %d 件)"
+                        % (home_point + (len(exact),)),
+                    }
+                )
         if not exact:
             self.nav_scrutiny_error = "nav_recipient_not_found"
             self.checks.append(
