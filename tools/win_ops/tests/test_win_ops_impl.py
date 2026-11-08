@@ -211,6 +211,32 @@ def test_mac_run_queue_detects_timeout(monkeypatch):
     assert result["status"] == "queue_timeout"
 
 
+def _mac_cfg(tunables=None):
+    cfg = {
+        "ssh": {
+            "host": "192.0.2.1",
+            "user": "example-user",
+            "identity": "/path/to/id_ed25519",
+            "proxy_script": "/path/to/ts-proxy.sh",
+        }
+    }
+    if tunables is not None:
+        cfg["tunables"] = tunables
+    return cfg
+
+
+def test_mac_ssh_options_use_connect_timeout_tunable():
+    mac = win_ops.Mac(_mac_cfg({"ssh_timeout": 10, "connect_timeout": 42}))
+    assert mac.connect_timeout == 42
+    assert "ConnectTimeout=42" in mac.base
+    assert "ConnectTimeout=25" not in mac.base
+
+
+def test_mac_ssh_options_default_connect_timeout():
+    mac = win_ops.Mac(_mac_cfg())
+    assert "ConnectTimeout=60" in mac.base
+
+
 def test_main_without_config_returns_2(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("WIN_OPS_CONFIG", str(tmp_path / "missing.json"))
     rc = win_ops.main(["list"])

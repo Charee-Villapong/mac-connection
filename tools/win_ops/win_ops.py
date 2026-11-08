@@ -293,7 +293,7 @@ class Mac:
             "-o",
             "StrictHostKeyChecking=accept-new",
             "-o",
-            "ConnectTimeout=25",
+            "ConnectTimeout=%d" % self.connect_timeout,
             "-o",
             "ControlMaster=auto",
             "-o",
