@@ -60,6 +60,8 @@ GUI エージェントキュー経由で実行し、結果は stdout に単一 J
   tty 上のプロセスを調べる。tunables.shell_commands 以外のプロセスがあれば
   busy とし、`--force` なしでは閉じない（`status="busy"`、`processes` を返す）。
   ターミナルでないアプリは `process_check.applicable=false` として進む。
+  tty が特定できない場合は確認不能として busy と同じ扱いにし、`--force`
+  なしでは閉じない（`status="process_check_failed"`）。
 - 閉じる実行は AX で行う: 対象窓の snapshot（境界つき）から閉じるボタンを
   特定する。規則: `role="button"` で、その中心が窓フレーム左上 +
   tunables.close_button_offset_px（既定 14）から許容差
