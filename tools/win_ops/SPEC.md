@@ -68,6 +68,9 @@ GUI エージェントキュー経由で実行し、結果は stdout に単一 J
   tunables.close_button_tolerance_px（既定 12）以内にあるもの。
   候補 0 件は `status="close_button_not_found"`、複数は
   `status="ambiguous_close_button"`。いずれも押さない。
+  フレームの基準は snapshot ツリーのルート要素の bounds を正とし、無い場合は
+  `data.window`、それも無い場合は list のフレームへフォールバックする
+  （ボタンと同一座標系で判定するため。再検閲で妥当性を確認済み）。
 - 実行後は list で再確認する。対象 id が消えていれば `verified=true`。
   残っていれば `ok=false, status="close_unverified"`。
 
