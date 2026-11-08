@@ -289,6 +289,54 @@ def test_close_with_only_app_rejected_and_no_click(tmp_path):
     assert transport.calls == []
 
 
+# --- ax の surface 検証 (推奨3) ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_surface",
+    [
+        "not-a-surface",
+        "WINDOW",
+        "window; rm -rf /",
+        "window$(id)",
+        "../window",
+        "window --help",
+    ],
+)
+def test_build_ax_script_rejects_invalid_surface(bad_surface):
+    with pytest.raises(win_ops.WinOpsError) as excinfo:
+        win_ops.build_ax_script("winops-t-bad.sh", app="メモ", surface=bad_surface)
+    assert excinfo.value.status == "invalid_argument"
+
+
+@pytest.mark.parametrize(
+    "surface", ["window", "focused", "menu-bar-extras", "notification-center"]
+)
+def test_build_ax_script_accepts_allowed_surfaces(surface):
+    script = win_ops.build_ax_script("winops-t-ok.sh", app="メモ", surface=surface)
+    assert "--surface %s" % surface in script
+
+
+def test_ax_invalid_surface_no_script_queued(tmp_path):
+    transport = StubTransport(lambda s, n, e: queue_ok({".ax.json": "{}"}))
+    ops = win_ops.WinOps(transport=transport, config=make_config(tmp_path))
+    result = ops.snapshot(app="メモ", surface="window; rm -rf /")
+    assert result["ok"] is False
+    assert result["command"] == "ax"
+    assert result["status"] == "invalid_argument"
+    assert transport.calls == []
+
+
+def test_press_invalid_surface_no_script_queued(tmp_path):
+    transport = StubTransport(lambda s, n, e: queue_ok({".ax.json": "{}"}))
+    ops = win_ops.WinOps(transport=transport, config=make_config(tmp_path))
+    result = ops.press(app="メモ", name="設定を開く", surface="bad surface")
+    assert result["ok"] is False
+    assert result["status"] == "invalid_argument"
+    assert transport.scripts_containing("click") == []
+    assert transport.calls == []
+
+
 @pytest.mark.parametrize("argv", [["close"], ["close", "--app", "メモ"]])
 def test_main_close_without_selector_returns_json_and_2(capsys, argv):
     rc = win_ops.main(argv)

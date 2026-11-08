@@ -38,6 +38,31 @@ DEFAULT_TUNABLES = {
     "shell_commands": ["zsh", "bash", "login", "-zsh", "-bash", "sh", "-sh"],
 }
 
+# agent-desktop snapshot の --surface 許容値 (これ以外はシェルへ埋め込まない)。
+ALLOWED_SURFACES = frozenset(
+    {
+        "window",
+        "focused",
+        "menu",
+        "menubar",
+        "sheet",
+        "popover",
+        "alert",
+        "desktop",
+        "taskbar",
+        "system-tray",
+        "quick-settings",
+        "notification-center",
+        "toolbar",
+        "dock",
+        "spotlight",
+        "menu-bar-extras",
+        "system-tray-overflow",
+        "start-menu",
+        "action-center",
+    }
+)
+
 # AppleScript の `tell application` で使う名前への寄せ (表示名 -> スクリプト名)。
 _APPLESCRIPT_APP_NAMES = {"ターミナル": "Terminal"}
 
@@ -422,11 +447,14 @@ def build_ax_script(
     session=None,
 ):
     """agent-desktop snapshot を実行し .ax.json に残すスクリプト。"""
+    resolved_surface = surface or "window"
+    if resolved_surface not in ALLOWED_SURFACES:
+        raise WinOpsError("invalid_argument", "invalid surface: %s" % resolved_surface)
     ad = agent_desktop_path or DEFAULT_AGENT_DESKTOP_PATH
     lines = _script_head(name, "AD=%s" % ad)
     lines.append("APP=$(echo '%s' | base64 -D)" % b64(app or ""))
     cmd = '$AD snapshot --app "$APP" --surface %s --session "%s" --include-bounds' % (
-        surface or "window",
+        resolved_surface,
         session or "win-ops",
     )
     if max_depth is not None:
@@ -642,14 +670,17 @@ class WinOps:
 
     def snapshot(self, app=None, surface=None, max_depth=None):
         name = self._queue_name("ax")
-        script = build_ax_script(
-            name,
-            app=app,
-            surface=surface or "window",
-            max_depth=max_depth,
-            agent_desktop_path=self.tunables["agent_desktop_path"],
-            session=self._session(),
-        )
+        try:
+            script = build_ax_script(
+                name,
+                app=app,
+                surface=surface or "window",
+                max_depth=max_depth,
+                agent_desktop_path=self.tunables["agent_desktop_path"],
+                session=self._session(),
+            )
+        except WinOpsError as exc:
+            return _fail("ax", exc.status, error=str(exc))
         res = self._run_queue(script, name, extras=(".ax.json",))
         if self._is_timeout(res):
             return _fail("ax", "queue_timeout")
