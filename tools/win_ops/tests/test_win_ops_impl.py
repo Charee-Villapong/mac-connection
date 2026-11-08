@@ -17,7 +17,15 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from spec_fixtures import StubTransport, make_config, queue_ok  # noqa: E402
+from spec_fixtures import (  # noqa: E402
+    CLOSE_TREE_OK,
+    LIST_TEXT_MEMO_ONLY,
+    StubTransport,
+    ax_json,
+    click_json,
+    make_config,
+    queue_ok,
+)
 
 import win_ops  # noqa: E402
 
@@ -216,3 +224,52 @@ def test_main_without_config_returns_2(monkeypatch, capsys, tmp_path):
 def test_winopserror_status_attribute(status):
     err = win_ops.WinOpsError(status)
     assert err.status == status
+
+
+# --- close のセレクタ無指定の拒否 (必須1) ------------------------------------
+
+
+def _single_window_close_transport():
+    """窓が 1 件だけある状態で、無指定 close が進めば click まで届くスタブ."""
+
+    def handler(script, name, extras):
+        if "click" in script:
+            return queue_ok({".click.json": click_json(True)})
+        if "snapshot" in script:
+            return queue_ok({".ax.json": ax_json(CLOSE_TREE_OK)})
+        return queue_ok({".list": LIST_TEXT_MEMO_ONLY})
+
+    return StubTransport(handler)
+
+
+def test_close_without_selector_rejected_and_no_click(tmp_path):
+    transport = _single_window_close_transport()
+    ops = win_ops.WinOps(transport=transport, config=make_config(tmp_path))
+    result = ops.close()
+    assert result["ok"] is False
+    assert result["command"] == "close"
+    assert result["status"] == "invalid_argument"
+    assert transport.scripts_containing("click") == []
+    assert transport.calls == []
+
+
+def test_close_with_only_app_rejected_and_no_click(tmp_path):
+    transport = _single_window_close_transport()
+    ops = win_ops.WinOps(transport=transport, config=make_config(tmp_path))
+    result = ops.close(app="メモ")
+    assert result["ok"] is False
+    assert result["status"] == "invalid_argument"
+    assert transport.scripts_containing("click") == []
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("argv", [["close"], ["close", "--app", "メモ"]])
+def test_main_close_without_selector_returns_json_and_2(capsys, argv):
+    rc = win_ops.main(argv)
+    assert rc == 2
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["command"] == "close"
+    assert payload["status"] == "invalid_argument"
+    assert payload.get("error")

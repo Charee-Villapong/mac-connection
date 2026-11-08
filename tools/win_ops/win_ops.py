@@ -721,6 +721,12 @@ class WinOps:
     # -- close --
 
     def close(self, window_id=None, title=None, app=None, force=False):
+        if window_id is None and title is None:
+            return _fail(
+                "close",
+                "invalid_argument",
+                error="close には --id か --title のいずれかが必要",
+            )
         listed = self.list_windows()
         if not listed.get("ok"):
             return _fail("close", listed.get("status", "list_failed"))
@@ -880,6 +886,15 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     command = args.command
+
+    if command == "close" and args.id is None and args.title is None:
+        result = _fail(
+            "close",
+            "invalid_argument",
+            error="close には --id か --title のいずれかが必要",
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 2
 
     try:
         config = load_config()
