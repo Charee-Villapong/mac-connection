@@ -70,7 +70,7 @@ GUI エージェントキュー経由で実行し、結果は stdout に単一 J
   `status="ambiguous_close_button"`。いずれも押さない。
   フレームの基準は snapshot ツリーのルート要素の bounds を正とし、無い場合は
   `data.window`、それも無い場合は list のフレームへフォールバックする
-  （ボタンと同一座標系で判定するため。再検閲で妥当性を確認済み）。
+  （ボタンと同一座標系で判定するため）。
 - 実行後は list で再確認する。対象 id が消えていれば `verified=true`。
   残っていれば `ok=false, status="close_unverified"`。
 

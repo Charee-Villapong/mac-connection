@@ -1,12 +1,12 @@
 # mac-connection
 
-スマホの Muse から、自宅の MacBook Air を操作できるようにする仕組み一式です。2026年11月2日に構築しました。
+スマホの Muse から、自宅の MacBook Air を操作できるようにする仕組み一式です。
 
 接続は Tailscale + SSH が土台で、その上に画面操作ツール（クリック・文字入力・画面確認）を自作して載せています。LINE の送信や macOS のアップデートなども、この仕組みで画面を見ながら行います。
 
 ## 構成
 
-- **muse-mac-setup-guide.pdf** — Mac と Muse をつなぐ設定ガイド（家族にも配布したもの）
+- **muse-mac-setup-guide.pdf** — Mac と Muse をつなぐ設定ガイド
 - **mac-tools/** — 画面操作ツールのソースコード（Swift）
   - gui-helper … クリック・キー入力
   - screencheck-main … 画面キャプチャ（ScreenCaptureKit）
@@ -17,7 +17,7 @@
 - **scripts/** — 接続用スクリプト、作業ログ窓、省電力設定、OSアップデート用など
   - 接続先などの実値はコードに直書きせず、.gitignore 対象の config.local.sh から読み込む構造（テンプレート config.local.example.sh のみ公開）
 - **guide/** — 設定ガイドの原稿（HTML）とプレビュー画像
-- **connectors/** — Mac のブラウザ操作（Playwright MCP）の接続メモ
+- **connectors/** — Mac のブラウザ操作（Playwright MCP）の接続メモ（現在は無効化済み）
 - スクリーンショット類は公開対象外（手元でのみ保管）
 
 ## 同期の流れ

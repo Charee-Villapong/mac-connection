@@ -9,7 +9,7 @@ Mac への接続と運用のための、実行用スクリプト置き場です�
 - show-activity.command … 作業ログを画面に流し続ける表示窓
 - set-power-saving.command … 省電力設定（画面オフの時間）の適用
 - set-display-never-ac.command … AC給電時の画面オフを無効に戻す
-- run-macos27-update.command … macOS アップデート用（実行済み）
+- run-macos27-update.command … macOS アップデート用
 
 ※ 接続先のアドレスやユーザー名などの実値は、コードに直書きしていません。
 mac-ssh は同じフォルダの config.local.sh（.gitignore 対象・Git 管理外）から実値を読み込む構造で、
