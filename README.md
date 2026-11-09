@@ -22,4 +22,4 @@
 
 ## 同期の流れ
 
-マスターは Claude の VM 側にあります。変更は VM からこのリポジトリへプッシュされ、Mac の `~/Desktop/muse/mac-connection` は pull で受け取ります。
+マスターは Claude の VM 側にあります。変更は VM からこのリポジトリへプッシュされます（Mac 側にクローンは置きません）。
